@@ -18,6 +18,20 @@ class OccupancyGrid:
         self.width = int(np.ceil((self.x_max - self.x_min) / resolution))
         self.height = int(np.ceil((self.y_max - self.y_min) / resolution))
         self.grid = np.full((self.height, self.width), UNKNOWN, dtype=np.int8)
+        self.reachable = np.ones((self.height, self.width), dtype=bool)
+
+    def set_reachable_mask(self, rects):
+        """Marque comme atteignables les cellules à l'intérieur d'une liste de
+        rectangles (x_min, x_max, y_min, y_max) en coordonnées monde — le
+        reste (espace mort hors pièces/couloirs) est exclu de la couverture
+        et ne peut plus générer de fausses frontières."""
+        self.reachable = np.zeros((self.height, self.width), dtype=bool)
+        for x_min, x_max, y_min, y_max in rects:
+            cx0, cy0 = self.world_to_cell(x_min, y_min)
+            cx1, cy1 = self.world_to_cell(x_max, y_max)
+            cx0, cx1 = max(0, cx0), min(self.width, cx1 + 1)
+            cy0, cy1 = max(0, cy0), min(self.height, cy1 + 1)
+            self.reachable[cy0:cy1, cx0:cx1] = True
 
     def world_to_cell(self, x, y):
         cx = int((x - self.x_min) / self.resolution)
@@ -46,7 +60,11 @@ class OccupancyGrid:
                 self.grid[cy, cx] = FREE
 
     def coverage_ratio(self):
-        return float(np.count_nonzero(self.grid != UNKNOWN)) / self.grid.size
+        total_reachable = np.count_nonzero(self.reachable)
+        if total_reachable == 0:
+            return 0.0
+        known_reachable = np.count_nonzero((self.grid != UNKNOWN) & self.reachable)
+        return known_reachable / total_reachable
 
     def local_crop(self, x, y, crop_size=64):
         """Crop local centré sur (x, y), axis-aligned (PAS encore aligné sur
@@ -81,9 +99,11 @@ class OccupancyGrid:
         return onehot
 
     def frontier_cells(self):
-        """Cellules libres ayant au moins un voisin inconnu (4-connexe)."""
+        """Cellules libres ayant au moins un voisin inconnu ET atteignable
+        (4-connexe) — un voisin inconnu hors zone atteignable ne compte pas,
+        ce serait une fausse frontière pointant vers rien."""
         free_mask = self.grid == FREE
-        unknown_mask = self.grid == UNKNOWN
+        unknown_mask = (self.grid == UNKNOWN) & self.reachable
         neighbor_unknown = np.zeros_like(free_mask)
         neighbor_unknown[1:, :] |= unknown_mask[:-1, :]
         neighbor_unknown[:-1, :] |= unknown_mask[1:, :]

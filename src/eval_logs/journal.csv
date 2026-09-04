@@ -1,0 +1,5 @@
+timestamp,name,version,total_timesteps_entraine,n_episodes,seed_start,victoire_rate,mort_rate,timeout_rate,couverture_moyenne,couverture_std,traj_moyenne_m,survivant_repere_rate,steps_victoire_moyen
+2026-08-30T23:32:50,explorer,v1,500000,40,9000,0.0,1.0,0.0,0.394,0.079,3.6,0.0,
+2026-09-04T15:36:59,explorer,v2,500000,30,9000,0.0,0.9,0.1,0.0,0.585,0.074,15.4,0.333,
+2026-09-04T15:38:21,explorer,v2,500000,3,9000,0.0,1.0,0.0,0.0,0.585,0.053,13.0,0.0,
+2026-09-04T15:43:23,explorer,v2,500000,3,9000,0.0,1.0,0.0,0.0,0.585,0.053,13.0,0.0,

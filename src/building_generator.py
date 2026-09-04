@@ -85,6 +85,20 @@ def _wall_y(x, y_start, y_end, thickness, height, name):
             f'rgba="0.75 0.72 0.68 1"/>\n')
 
 
+def compute_navigable_rects(layout):
+    """Rectangles (x_min, x_max, y_min, y_max) de toutes les zones RÉELLEMENT
+    navigables (pièces + couloirs). La grille globale est un rectangle
+    dimensionné sur la pièce la plus large ; les pièces plus étroites
+    laissent donc des bandes d'espace mort sur les côtés (ni libres, ni
+    occupées, jamais atteignables) — on les exclut du calcul de couverture."""
+    rects = [(r.x_min, r.x_max, r.y_min, r.y_max) for r in layout.rooms]
+    gap_half = layout.corridor_width / 2
+    for i in range(len(layout.rooms) - 1):
+        y0, y1 = layout.rooms[i].y_max, layout.rooms[i + 1].y_min
+        rects.append((-gap_half, gap_half, y0, y1))
+    return rects
+
+
 def generate_building_xml(layout, wall_thickness=0.15):
     xml = ""
     gap_half = layout.corridor_width / 2

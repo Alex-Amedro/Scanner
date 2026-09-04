@@ -34,6 +34,9 @@ def main():
                          help="Action nulle à chaque step (le drone ne bouge pas) — pour juste regarder "
                               "le bâtiment, le LiDAR et les frontières. Active --visual automatiquement "
                               "si non précisé.")
+    parser.add_argument("--slow", action="store_true",
+                         help="Ralentit encore plus la boucle visuelle (0.15s/step au lieu de 0.02s) — "
+                              "pratique pour observer un comportement précis image par image.")
     args = parser.parse_args()
 
     if args.static and not args.visual:
@@ -41,7 +44,7 @@ def main():
         print("(--static implique --visual, activé automatiquement)")
 
     n_steps = args.steps or (100 if args.visual else 300)
-    print_every = 10 if args.visual else 50
+    print_every = 1 if args.slow else (10 if args.visual else 50)
 
     env = ExplorerEnv(n_rooms=(2, 4), seed=args.seed)
     obs, info = env.reset(seed=args.seed)
@@ -62,7 +65,7 @@ def main():
 
         if args.visual:
             env.render(show_lidar=not args.no_lidar, show_frontiers=not args.no_frontiers)
-            time.sleep(0.02)
+            time.sleep(0.15 if args.slow else 0.02)
 
         if i % print_every == 0:
             print(f"step {i:4d} | couverture={info['coverage']*100:5.1f}% "

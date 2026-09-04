@@ -16,7 +16,7 @@ import mujoco.viewer
 import numpy as np
 from gymnasium import spaces
 
-from building_generator import generate_building_xml, generate_layout
+from building_generator import compute_navigable_rects, generate_building_xml, generate_layout
 from occupancy_grid import OccupancyGrid
 
 # --- Corps du drone : repris tel quel du projet précédent (drone-rl-speedrunner).
@@ -50,20 +50,22 @@ _DRONE_XML = """
 </body>
 """
 
-_ACTUATORS_XML = """
+_ACTUATORS_XML_TEMPLATE = """
 <actuator>
     <motor name="thrust" site="center_of_mass" gear="0 0 20 0 0 0" ctrllimited="true" ctrlrange="-1 1"/>
-    <motor name="roll" site="center_of_mass" gear="0 0 0 2.0 0 0" ctrllimited="true" ctrlrange="-1 1"/>
-    <motor name="pitch" site="center_of_mass" gear="0 0 0 0 2.0 0" ctrllimited="true" ctrlrange="-1 1"/>
-    <motor name="yaw" site="center_of_mass" gear="0 0 0 0 0 1.0" ctrllimited="true" ctrlrange="-1 1"/>
+    <motor name="roll" site="center_of_mass" gear="0 0 0 {gear_rp} 0 0" ctrllimited="true" ctrlrange="-1 1"/>
+    <motor name="pitch" site="center_of_mass" gear="0 0 0 0 {gear_rp} 0" ctrllimited="true" ctrlrange="-1 1"/>
+    <motor name="yaw" site="center_of_mass" gear="0 0 0 0 0 {gear_yaw}" ctrllimited="true" ctrlrange="-1 1"/>
 </actuator>
 """
 
 
 class ExplorerEnv(gym.Env):
     def __init__(self, n_rooms=(2, 4), grid_resolution=0.15, crop_size=64,
-                 k_frontiers=5, n_lidar_horizontal=72, portee_lidar=15.0,
+                 k_frontiers=5, n_lidar_horizontal=180, portee_lidar=15.0,
                  beta=0.5, r_exp=100.0, coverage_target=0.9,
+                 gear_roll_pitch=0.5, gear_yaw=0.25, up_z_min=0.3, coeff_spin=0.0,
+                 task="explore", show_survivor_marker=True,
                  max_steps=2000, seed=None):
         super().__init__()
 
@@ -76,6 +78,12 @@ class ExplorerEnv(gym.Env):
         self.beta = beta
         self.r_exp = r_exp
         self.coverage_target = coverage_target
+        self.gear_roll_pitch = gear_roll_pitch
+        self.gear_yaw = gear_yaw
+        self.up_z_min = up_z_min
+        self.coeff_spin = coeff_spin
+        self.task = task
+        self.show_survivor_marker = show_survivor_marker
         self.max_steps = max_steps
 
         self._rng = random.Random(seed)
@@ -83,9 +91,10 @@ class ExplorerEnv(gym.Env):
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
         self.observation_space = spaces.Dict({
             "local_crop": spaces.Box(low=0.0, high=1.0, shape=(3, crop_size, crop_size), dtype=np.float32),
+            "coverage": spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
             "frontier_vector": spaces.Box(low=-1.0, high=1.0, shape=(k_frontiers * 4,), dtype=np.float32),
-            "relief_rays": spaces.Box(low=0.0, high=1.0, shape=(16,), dtype=np.float32),
-            "kinematics": spaces.Box(low=-50.0, high=50.0, shape=(7,), dtype=np.float32),
+            "relief_rays": spaces.Box(low=0.0, high=1.0, shape=(18,), dtype=np.float32),
+            "kinematics": spaces.Box(low=-50.0, high=50.0, shape=(10,), dtype=np.float32),
         })
 
         self.model = None
@@ -112,14 +121,20 @@ class ExplorerEnv(gym.Env):
 
         room0 = self.layout.rooms[0]
         spawn_x, spawn_y = room0.center
+        self._spawn_xy = (spawn_x, spawn_y)
+        self._spawn_z = 1.2
         drone_xml = _DRONE_XML.format(spawn_x=f"{spawn_x:.3f}", spawn_y=f"{spawn_y:.3f}", spawn_z="1.2")
 
         survivor_room = self.layout.rooms[-1]
         sx = self._rng.uniform(survivor_room.x_min + 0.5, survivor_room.x_max - 0.5)
         sy = self._rng.uniform(survivor_room.y_min + 0.5, survivor_room.y_max - 0.5)
         self.survivor_xy = (sx, sy)
-        survivor_xml = (f'<geom name="survivant" type="sphere" pos="{sx:.3f} {sy:.3f} 0.3" '
-                         f'size="0.2" rgba="1.0 0.1 0.1 0.9" contype="0" conaffinity="0"/>')
+        survivor_xml = ""
+        if self.show_survivor_marker:
+            survivor_xml = (f'<geom name="survivant" type="sphere" pos="{sx:.3f} {sy:.3f} 0.3" '
+                             f'size="0.2" rgba="1.0 0.1 0.1 0.9" contype="0" conaffinity="0"/>')
+
+        actuators_xml = _ACTUATORS_XML_TEMPLATE.format(gear_rp=self.gear_roll_pitch, gear_yaw=self.gear_yaw)
 
         full_xml = f"""
         <mujoco>
@@ -130,7 +145,7 @@ class ExplorerEnv(gym.Env):
                 {survivor_xml}
                 {drone_xml}
             </worldbody>
-            {_ACTUATORS_XML}
+            {actuators_xml}
         </mujoco>
         """
         return full_xml
@@ -151,12 +166,13 @@ class ExplorerEnv(gym.Env):
 
         self.grid = OccupancyGrid(self.layout.world_x_range, self.layout.world_y_range,
                                    resolution=self.grid_resolution)
+        self.grid.set_reachable_mask(compute_navigable_rects(self.layout))
         self._step_count = 0
         self._last_phi = 0.0
         self._last_known_cells = 0
 
         self._scan_and_update_grid()
-        self._last_known_cells = int(np.count_nonzero(self.grid.grid != -1))
+        self._last_known_cells = int(np.count_nonzero((self.grid.grid != -1) & self.grid.reachable))
         self._last_phi = self.grid.potential(self._last_frontiers, beta=self.beta)
         obs = self._get_obs()
         return obs, {}
@@ -175,26 +191,36 @@ class ExplorerEnv(gym.Env):
         self._step_count += 1
 
         pos = self.data.body("drone_body").xpos
+        quat = self.data.body("drone_body").xquat
         en_collision = self.data.ncon > 0
+        _, _, up_z = _quat_roll_pitch_upz(quat)
+        retourne = up_z < self.up_z_min
 
-        known_cells = int(np.count_nonzero(self.grid.grid != -1))
+        known_cells = int(np.count_nonzero((self.grid.grid != -1) & self.grid.reachable))
         n_new_cells = known_cells - self._last_known_cells
         self._last_known_cells = known_cells
 
         coverage = self.grid.coverage_ratio()
         phi = self.grid.potential(self._last_frontiers, beta=self.beta)
 
-        if coverage >= self.coverage_target:
+        if self.task == "hover":
+            derive_horizontale = float(np.hypot(pos[0] - self._spawn_xy[0], pos[1] - self._spawn_xy[1]))
+            erreur_altitude = abs(pos[2] - self._spawn_z)
+            reward = up_z - 0.5 * derive_horizontale - 0.5 * erreur_altitude
+        elif coverage >= self.coverage_target:
             reward = self.r_exp
         else:
             reward = n_new_cells + (phi - self._last_phi)
+            if self.coeff_spin > 0.0:
+                vel_ang = self.data.qvel[3:6]
+                reward -= self.coeff_spin * float(np.linalg.norm(vel_ang))
         self._last_phi = phi
 
         terminated = False
-        if en_collision:
+        if en_collision or retourne:
             terminated = True
             reward -= 50.0
-        elif coverage >= self.coverage_target:
+        elif self.task != "hover" and coverage >= self.coverage_target:
             terminated = True
 
         truncated = self._step_count >= self.max_steps
@@ -206,6 +232,9 @@ class ExplorerEnv(gym.Env):
             "distance_survivant": dist_survivant,
             "survivant_repere": dist_survivant < 1.0,
             "collision": en_collision,
+            "retourne": retourne,
+            "truncated": bool(truncated),
+            "pos": [float(pos[0]), float(pos[1]), float(pos[2])],
         }
         return obs, float(reward), terminated, truncated, info
 
@@ -260,15 +289,27 @@ class ExplorerEnv(gym.Env):
                 self._relief_dists.append(dist / self.portee_lidar)
                 self._relief_dirs.append(vec)
 
+        # 2 rayons verticaux purs, en complément de l'éventail incliné :
+        # les 16 rayons ci-dessus sont tous à ±30°, donc un trou/rebord pile
+        # à l'aplomb du drone (au-dessus ou en-dessous) leur échapperait.
+        for vec in (np.array([0.0, 0.0, 1.0]), np.array([0.0, 0.0, -1.0])):
+            dist = mujoco.mj_ray(self.model, self.data, pos, vec, None, 1, drone_id, geom_id)
+            dist = min(dist, self.portee_lidar) if dist >= 0 else self.portee_lidar
+            self._relief_dists.append(dist / self.portee_lidar)
+            self._relief_dirs.append(vec)
+
         self._last_frontiers = self.grid.frontier_features(
             pos[0], pos[1], yaw, k=self.k_frontiers)
 
     def _get_obs(self):
         pos = self.data.body("drone_body").xpos
+        quat = self.data.body("drone_body").xquat
         vel_lin = self.data.qvel[0:3].copy()
         vel_ang = self.data.qvel[3:6].copy()
+        roll, pitch, up_z = _quat_roll_pitch_upz(quat)
 
         local_crop = self.grid.local_crop_onehot(pos[0], pos[1], self.crop_size)
+        coverage = np.array([self.grid.coverage_ratio()], dtype=np.float32)
 
         frontier_vec = np.array([
             v for f in self._last_frontiers
@@ -276,11 +317,12 @@ class ExplorerEnv(gym.Env):
         ], dtype=np.float32)
 
         kinematics = np.concatenate([
-            vel_lin, vel_ang, [pos[2] / 3.0],
+            vel_lin, vel_ang, [pos[2] / 3.0, roll, pitch, up_z],
         ]).astype(np.float32)
 
         return {
             "local_crop": local_crop.astype(np.float32),
+            "coverage": coverage,
             "frontier_vector": frontier_vec,
             "relief_rays": np.array(self._relief_dists, dtype=np.float32),
             "kinematics": kinematics,
@@ -361,3 +403,13 @@ class ExplorerEnv(gym.Env):
 def _quat_to_yaw(quat):
     w, x, y, z = quat
     return float(np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z)))
+
+
+def _quat_roll_pitch_upz(quat):
+    """Roll, pitch (rad) et 'uprightness' (1 = bien droit, 0 = sur la tranche,
+    -1 = complètement à l'envers) à partir du quaternion du corps."""
+    w, x, y, z = quat
+    roll = float(np.arctan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y)))
+    pitch = float(np.arcsin(np.clip(2 * (w * y - z * x), -1.0, 1.0)))
+    up_z = float(1 - 2 * (x * x + y * y))
+    return roll, pitch, up_z
