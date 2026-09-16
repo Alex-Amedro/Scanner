@@ -1,9 +1,0 @@
-{
-  "name": "explorer",
-  "version": "v2",
-  "total_timesteps": 500000,
-  "last_saved": "2026-09-04T14:35:23",
-  "n_envs": 8,
-  "n_steps": 1024,
-  "batch_size": 256
-}
