@@ -27,8 +27,6 @@ def run_episode(model, vec_env, seed, max_steps=2000, visual=False, slow=False, 
     traj_length = 0.0
     prev_pos = None
     total_reward = 0.0
-    survivor_found = False
-    step_survivor = None
     collision = False
     retourne = False
     truncated = False
@@ -37,7 +35,7 @@ def run_episode(model, vec_env, seed, max_steps=2000, visual=False, slow=False, 
 
     if debug_angles:
         print(f"{'step':>4} {'roll°':>7} {'pitch°':>7} {'yaw°':>7} {'up_z':>6} "
-              f"{'v_ang':>6} {'align':>6} {'reward':>7}")
+              f"{'v_ang':>6} {'align':>6} {'new_c':>5} {'reward':>7}")
 
     for step_count in range(1, max_steps + 1):
         action, _ = model.predict(obs, deterministic=True)
@@ -50,6 +48,7 @@ def run_episode(model, vec_env, seed, max_steps=2000, visual=False, slow=False, 
             print(f"{step_count:>4} {info.get('roll_deg', 0):>7.1f} {info.get('pitch_deg', 0):>7.1f} "
                   f"{info.get('yaw_deg', 0):>7.1f} {info.get('up_z', 0):>6.2f} "
                   f"{info.get('vel_ang_norm', 0):>6.2f} {info.get('alignement', 0):>6.2f} "
+                f"{info.get('n_new_cells', 0):>5} "
                   f"{float(reward[0]):>7.2f}")
 
         pos = info.get("pos")
@@ -57,10 +56,6 @@ def run_episode(model, vec_env, seed, max_steps=2000, visual=False, slow=False, 
             if prev_pos is not None:
                 traj_length += float(np.linalg.norm(np.array(pos) - np.array(prev_pos)))
             prev_pos = pos
-
-        if info.get("survivant_repere") and not survivor_found:
-            survivor_found = True
-            step_survivor = step_count
 
         if info.get("collision"):
             collision = True
@@ -90,8 +85,6 @@ def run_episode(model, vec_env, seed, max_steps=2000, visual=False, slow=False, 
         "coverage": final_coverage,
         "steps": step_count,
         "traj_length": traj_length,
-        "survivor_found": survivor_found,
-        "step_survivor": step_survivor,
         "total_reward": total_reward,
     }
 
@@ -148,7 +141,7 @@ def main():
     vec_env.training = False  # ne pas continuer à mettre à jour les stats de normalisation
     model = PPO.load(paths["model"], env=vec_env)
 
-    header = f"{'#':>3} {'issue':<9} {'couverture':>10} {'steps':>7} {'trajectoire':>11} {'survivant':>10} {'reward':>9}"
+    header = f"{'#':>3} {'issue':<9} {'couverture':>10} {'steps':>7} {'trajectoire':>11} {'reward':>9}"
     print(header)
     print("-" * len(header))
 
@@ -158,9 +151,8 @@ def main():
         r = run_episode(model, vec_env, seed=seed, max_steps=args.max_steps,
                          visual=args.visual, slow=args.slow, debug_angles=args.debug_angles)
         results.append(r)
-        survivant_str = f"oui @{r['step_survivor']}" if r["survivor_found"] else "non"
         print(f"{i:>3} {r['outcome']:<9} {r['coverage']*100:>9.1f}% {r['steps']:>7} "
-              f"{r['traj_length']:>10.1f}m {survivant_str:>10} {r['total_reward']:>9.1f}")
+              f"{r['traj_length']:>10.1f}m {r['total_reward']:>9.1f}")
 
     n = len(results)
     victoire_rate = sum(r["outcome"] == "victoire" for r in results) / n
@@ -170,7 +162,6 @@ def main():
     couverture_moy = np.mean([r["coverage"] for r in results])
     couverture_std = np.std([r["coverage"] for r in results])
     traj_moy = np.mean([r["traj_length"] for r in results])
-    survivant_rate = sum(r["survivor_found"] for r in results) / n
     steps_victoire = [r["steps"] for r in results if r["outcome"] == "victoire"]
     steps_victoire_moy = np.mean(steps_victoire) if steps_victoire else None
 
@@ -179,7 +170,6 @@ def main():
           f"Retourné : {retourne_rate*100:.0f}%   Timeout : {timeout_rate*100:.0f}%")
     print(f"Couverture moyenne : {couverture_moy*100:.1f}% (± {couverture_std*100:.1f})")
     print(f"Trajectoire moyenne : {traj_moy:.1f} m")
-    print(f"Survivant repéré : {survivant_rate*100:.0f}% des épisodes")
     if steps_victoire_moy:
         print(f"Steps moyens jusqu'à victoire (sur les épisodes gagnés) : {steps_victoire_moy:.0f}")
 
@@ -195,7 +185,6 @@ def main():
         "timeout_rate": round(timeout_rate, 3),
         "couverture_moyenne": round(couverture_moy, 3), "couverture_std": round(couverture_std, 3),
         "traj_moyenne_m": round(traj_moy, 1),
-        "survivant_repere_rate": round(survivant_rate, 3),
         "steps_victoire_moyen": round(steps_victoire_moy, 0) if steps_victoire_moy else "",
     }
     write_header = not os.path.exists(journal_path)

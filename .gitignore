@@ -217,10 +217,9 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-#model
-runs/
+# Generated model artifacts stay local and are not transferred.
 models/
-eval_logs/
-*.csv
-src/eval_logs/journal.csv
+runs/
+
+# Evaluation and TensorBoard logs are kept for transfer.
 *.png

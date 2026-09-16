@@ -23,7 +23,7 @@ from occupancy_grid import OccupancyGrid
 # Seule la position de spawn change (à l'intérieur de la première pièce).
 _DRONE_XML = """
 <body name="drone_body" pos="{spawn_x} {spawn_y} {spawn_z}">
-    <joint type="free" damping="0.05"/>
+    <joint type="free"/>
     <inertial pos="0 0 0" mass="0.8" diaginertia="0.002 0.002 0.002"/>
     <geom type="box" size="0.1 0.1 0.05" rgba="0.18 0.18 0.22 1" mass="0.8"/>
     <geom type="box" pos="0 0.1 0" size="0.05 0.05 0.05" rgba="1 0.25 0.1 1"/>
@@ -65,7 +65,7 @@ class ExplorerEnv(gym.Env):
                  k_frontiers=5, n_lidar_horizontal=180, portee_lidar=15.0,
                  beta=0.5, r_exp=100.0, coverage_target=0.9,
                  gear_roll_pitch=0.5, gear_yaw=0.25, up_z_min=0.3, coeff_spin=0.0, coeff_align=0.0,
-                 task="explore", show_survivor_marker=True,
+                 task="explore",
                  max_steps=2000, seed=None):
         super().__init__()
 
@@ -84,7 +84,6 @@ class ExplorerEnv(gym.Env):
         self.coeff_spin = coeff_spin
         self.coeff_align = coeff_align
         self.task = task
-        self.show_survivor_marker = show_survivor_marker
         self.max_steps = max_steps
 
         self._rng = random.Random(seed)
@@ -110,7 +109,6 @@ class ExplorerEnv(gym.Env):
         self._last_lidar_origin = None
         self._last_lidar_dirs = []
         self._last_lidar_dists = []
-        self.survivor_xy = None
 
     # ------------------------------------------------------------------ #
     # Construction du monde
@@ -126,15 +124,6 @@ class ExplorerEnv(gym.Env):
         self._spawn_z = 1.2
         drone_xml = _DRONE_XML.format(spawn_x=f"{spawn_x:.3f}", spawn_y=f"{spawn_y:.3f}", spawn_z="1.2")
 
-        survivor_room = self.layout.rooms[-1]
-        sx = self._rng.uniform(survivor_room.x_min + 0.5, survivor_room.x_max - 0.5)
-        sy = self._rng.uniform(survivor_room.y_min + 0.5, survivor_room.y_max - 0.5)
-        self.survivor_xy = (sx, sy)
-        survivor_xml = ""
-        if self.show_survivor_marker:
-            survivor_xml = (f'<geom name="survivant" type="sphere" pos="{sx:.3f} {sy:.3f} 0.3" '
-                             f'size="0.2" rgba="1.0 0.1 0.1 0.9" contype="0" conaffinity="0"/>')
-
         actuators_xml = _ACTUATORS_XML_TEMPLATE.format(gear_rp=self.gear_roll_pitch, gear_yaw=self.gear_yaw)
 
         full_xml = f"""
@@ -143,7 +132,6 @@ class ExplorerEnv(gym.Env):
             <worldbody>
                 <light pos="0 0 5" dir="0 0 -1" diffuse="1 1 1"/>
                 {building_xml}
-                {survivor_xml}
                 {drone_xml}
             </worldbody>
             {actuators_xml}
@@ -236,12 +224,9 @@ class ExplorerEnv(gym.Env):
 
         truncated = self._step_count >= self.max_steps
 
-        dist_survivant = float(np.hypot(pos[0] - self.survivor_xy[0], pos[1] - self.survivor_xy[1]))
         info = {
             "coverage": coverage,
             "n_new_cells": n_new_cells,
-            "distance_survivant": dist_survivant,
-            "survivant_repere": dist_survivant < 1.0,
             "collision": en_collision,
             "retourne": retourne,
             "truncated": bool(truncated),
