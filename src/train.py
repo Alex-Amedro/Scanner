@@ -71,6 +71,12 @@ def main():
                               "0.3 ≈ 70° d'inclinaison.")
     parser.add_argument("--coverage-target", type=float, default=0.9,
                          help="Pourcentage de couverture (sur la zone atteignable) déclenchant la victoire.")
+    parser.add_argument("--coeff-align", type=float, default=0.0,
+                         help="Bonus d'alignement entre le cap et la direction de déplacement horizontal "
+                              "(cos de l'angle entre les deux, actif seulement si vitesse horizontale > 0.3 m/s). "
+                              "Basé sur le 'tangent path reward' documenté pour la navigation par capteurs de "
+                              "proximité (ScienceDirect 2025) — plus ciblé qu'une pénalité générale sur la "
+                              "rotation. DÉSACTIVÉ par défaut (0.0), à tester et comparer via evaluate.py.")
     parser.add_argument("--coeff-spin", type=float, default=0.0,
                          help="Pénalité sur la norme de la vitesse angulaire, pour décourager le "
                               "comportement de 'toupie'. DÉSACTIVÉ par défaut (0.0) : le projet "
@@ -85,6 +91,7 @@ def main():
     env_kwargs = dict(
         task=args.task, gear_roll_pitch=args.gear_roll_pitch, gear_yaw=args.gear_yaw,
         up_z_min=args.up_z_min, coverage_target=args.coverage_target, coeff_spin=args.coeff_spin,
+        coeff_align=args.coeff_align,
     )
     env = build_vec_env(args.n_envs, args.no_subproc, env_kwargs)
 

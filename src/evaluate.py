@@ -20,7 +20,7 @@ from datetime import datetime
 import numpy as np
 
 
-def run_episode(model, vec_env, seed, max_steps=2000, visual=False, slow=False):
+def run_episode(model, vec_env, seed, max_steps=2000, visual=False, slow=False, debug_angles=False):
     vec_env.seed(seed)
     obs = vec_env.reset()
 
@@ -35,12 +35,22 @@ def run_episode(model, vec_env, seed, max_steps=2000, visual=False, slow=False):
     final_coverage = 0.0
     step_count = 0
 
+    if debug_angles:
+        print(f"{'step':>4} {'roll°':>7} {'pitch°':>7} {'yaw°':>7} {'up_z':>6} "
+              f"{'v_ang':>6} {'align':>6} {'reward':>7}")
+
     for step_count in range(1, max_steps + 1):
         action, _ = model.predict(obs, deterministic=True)
         obs, reward, dones, infos = vec_env.step(action)
         info = infos[0]
         total_reward += float(reward[0])
         final_coverage = info.get("coverage", final_coverage)
+
+        if debug_angles:
+            print(f"{step_count:>4} {info.get('roll_deg', 0):>7.1f} {info.get('pitch_deg', 0):>7.1f} "
+                  f"{info.get('yaw_deg', 0):>7.1f} {info.get('up_z', 0):>6.2f} "
+                  f"{info.get('vel_ang_norm', 0):>6.2f} {info.get('alignement', 0):>6.2f} "
+                  f"{float(reward[0]):>7.2f}")
 
         pos = info.get("pos")
         if pos is not None:
@@ -99,6 +109,11 @@ def main():
                          help="Ouvre le viewer MuJoCo et rejoue chaque épisode visuellement "
                               "(pense à réduire --n-episodes, ex: 3).")
     parser.add_argument("--slow", action="store_true", help="Ralentit encore plus la boucle visuelle.")
+    parser.add_argument("--debug-angles", action="store_true",
+                         help="Imprime roll/pitch/yaw/uprightness/vitesse angulaire/alignement à chaque "
+                              "step — utile pour analyser précisément un comportement de rotation, sans "
+                              "dépendre du visuel. Combinable avec --visual, ou seul (limite --n-episodes "
+                              "à 2-3, ça imprime beaucoup de lignes).")
     args = parser.parse_args()
 
     from stable_baselines3 import PPO
@@ -141,7 +156,7 @@ def main():
     for i in range(args.n_episodes):
         seed = args.seed_start + i
         r = run_episode(model, vec_env, seed=seed, max_steps=args.max_steps,
-                         visual=args.visual, slow=args.slow)
+                         visual=args.visual, slow=args.slow, debug_angles=args.debug_angles)
         results.append(r)
         survivant_str = f"oui @{r['step_survivor']}" if r["survivor_found"] else "non"
         print(f"{i:>3} {r['outcome']:<9} {r['coverage']*100:>9.1f}% {r['steps']:>7} "

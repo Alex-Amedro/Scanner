@@ -23,7 +23,7 @@ from occupancy_grid import OccupancyGrid
 # Seule la position de spawn change (à l'intérieur de la première pièce).
 _DRONE_XML = """
 <body name="drone_body" pos="{spawn_x} {spawn_y} {spawn_z}">
-    <joint type="free"/>
+    <joint type="free" damping="0.05"/>
     <inertial pos="0 0 0" mass="0.8" diaginertia="0.002 0.002 0.002"/>
     <geom type="box" size="0.1 0.1 0.05" rgba="0.18 0.18 0.22 1" mass="0.8"/>
     <geom type="box" pos="0 0.1 0" size="0.05 0.05 0.05" rgba="1 0.25 0.1 1"/>
@@ -64,7 +64,7 @@ class ExplorerEnv(gym.Env):
     def __init__(self, n_rooms=(2, 4), grid_resolution=0.15, crop_size=64,
                  k_frontiers=5, n_lidar_horizontal=180, portee_lidar=15.0,
                  beta=0.5, r_exp=100.0, coverage_target=0.9,
-                 gear_roll_pitch=0.5, gear_yaw=0.25, up_z_min=0.3, coeff_spin=0.0,
+                 gear_roll_pitch=0.5, gear_yaw=0.25, up_z_min=0.3, coeff_spin=0.0, coeff_align=0.0,
                  task="explore", show_survivor_marker=True,
                  max_steps=2000, seed=None):
         super().__init__()
@@ -82,6 +82,7 @@ class ExplorerEnv(gym.Env):
         self.gear_yaw = gear_yaw
         self.up_z_min = up_z_min
         self.coeff_spin = coeff_spin
+        self.coeff_align = coeff_align
         self.task = task
         self.show_survivor_marker = show_survivor_marker
         self.max_steps = max_steps
@@ -193,7 +194,8 @@ class ExplorerEnv(gym.Env):
         pos = self.data.body("drone_body").xpos
         quat = self.data.body("drone_body").xquat
         en_collision = self.data.ncon > 0
-        _, _, up_z = _quat_roll_pitch_upz(quat)
+        roll, pitch, up_z = _quat_roll_pitch_upz(quat)
+        yaw = _quat_to_yaw(quat)
         retourne = up_z < self.up_z_min
 
         known_cells = int(np.count_nonzero((self.grid.grid != -1) & self.grid.reachable))
@@ -203,16 +205,25 @@ class ExplorerEnv(gym.Env):
         coverage = self.grid.coverage_ratio()
         phi = self.grid.potential(self._last_frontiers, beta=self.beta)
 
+        vel_lin = self.data.qvel[0:3]
+        vel_ang = self.data.qvel[3:6]
+        vitesse_horiz = float(np.hypot(vel_lin[0], vel_lin[1]))
+        alignement = 0.0
+        if vitesse_horiz > 0.3:  # sous ce seuil, la direction de vitesse est trop bruitée pour être significative
+            cap = np.array([np.cos(yaw), np.sin(yaw)])
+            direction_vitesse = np.array([vel_lin[0], vel_lin[1]]) / vitesse_horiz
+            alignement = float(np.dot(cap, direction_vitesse))  # 1 = aligné, -1 = à l'envers
+        bonus_alignement = self.coeff_align * alignement if self.coeff_align > 0.0 else 0.0
+
         if self.task == "hover":
             derive_horizontale = float(np.hypot(pos[0] - self._spawn_xy[0], pos[1] - self._spawn_xy[1]))
             erreur_altitude = abs(pos[2] - self._spawn_z)
-            reward = up_z - 0.5 * derive_horizontale - 0.5 * erreur_altitude
+            reward = up_z - 0.5 * derive_horizontale - 0.5 * erreur_altitude + bonus_alignement
         elif coverage >= self.coverage_target:
             reward = self.r_exp
         else:
-            reward = n_new_cells + (phi - self._last_phi)
+            reward = n_new_cells + (phi - self._last_phi) + bonus_alignement
             if self.coeff_spin > 0.0:
-                vel_ang = self.data.qvel[3:6]
                 reward -= self.coeff_spin * float(np.linalg.norm(vel_ang))
         self._last_phi = phi
 
@@ -235,6 +246,12 @@ class ExplorerEnv(gym.Env):
             "retourne": retourne,
             "truncated": bool(truncated),
             "pos": [float(pos[0]), float(pos[1]), float(pos[2])],
+            "roll_deg": float(np.degrees(roll)),
+            "pitch_deg": float(np.degrees(pitch)),
+            "yaw_deg": float(np.degrees(yaw)),
+            "up_z": up_z,
+            "vel_ang_norm": float(np.linalg.norm(vel_ang)),
+            "alignement": alignement,
         }
         return obs, float(reward), terminated, truncated, info
 

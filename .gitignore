@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+#model
+runs/
+models/
+eval_logs/
+*.csv
+src/eval_logs/journal.csv
+*.png
