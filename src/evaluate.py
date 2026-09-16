@@ -19,10 +19,23 @@ from datetime import datetime
 
 import numpy as np
 
+from building_generator import compute_navigable_rects
+
+
+def _in_corridor(env, x, y):
+    """True si (x, y) tombe dans un rectangle de couloir (pas de pièce) du
+    layout couramment chargé dans env. Les couloirs sont ajoutés après les
+    pièces par compute_navigable_rects, d'où le découpage par n_rooms."""
+    rects = compute_navigable_rects(env.layout)
+    n_rooms = len(env.layout.rooms)
+    return any(x_min <= x <= x_max and y_min <= y <= y_max
+               for x_min, x_max, y_min, y_max in rects[n_rooms:])
+
 
 def run_episode(model, vec_env, seed, max_steps=2000, visual=False, slow=False, debug_angles=False):
     vec_env.seed(seed)
     obs = vec_env.reset()
+    raw_env = vec_env.venv.envs[0]  # VecNormalize enveloppe le DummyVecEnv
 
     traj_length = 0.0
     prev_pos = None
@@ -32,10 +45,11 @@ def run_episode(model, vec_env, seed, max_steps=2000, visual=False, slow=False, 
     truncated = False
     final_coverage = 0.0
     step_count = 0
+    collision_location = None  # "couloir" ou "pièce", fixé à la 1ère collision de l'épisode
 
     if debug_angles:
         print(f"{'step':>4} {'roll°':>7} {'pitch°':>7} {'yaw°':>7} {'up_z':>6} "
-              f"{'v_ang':>6} {'align':>6} {'new_c':>5} {'reward':>7}")
+              f"{'v_ang':>6} {'align':>6} {'frnt_d':>6} {'reward':>7}")
 
     for step_count in range(1, max_steps + 1):
         action, _ = model.predict(obs, deterministic=True)
@@ -48,7 +62,7 @@ def run_episode(model, vec_env, seed, max_steps=2000, visual=False, slow=False, 
             print(f"{step_count:>4} {info.get('roll_deg', 0):>7.1f} {info.get('pitch_deg', 0):>7.1f} "
                   f"{info.get('yaw_deg', 0):>7.1f} {info.get('up_z', 0):>6.2f} "
                   f"{info.get('vel_ang_norm', 0):>6.2f} {info.get('alignement', 0):>6.2f} "
-                f"{info.get('n_new_cells', 0):>5} "
+                  f"{info.get('nearest_frontier_dist', -1):>6.2f} "
                   f"{float(reward[0]):>7.2f}")
 
         pos = info.get("pos")
@@ -59,6 +73,9 @@ def run_episode(model, vec_env, seed, max_steps=2000, visual=False, slow=False, 
 
         if info.get("collision"):
             collision = True
+            if collision_location is None:
+                x, y = info["pos"][0], info["pos"][1]
+                collision_location = "couloir" if _in_corridor(raw_env, x, y) else "pièce"
         if info.get("retourne"):
             retourne = True
         if info.get("truncated"):
@@ -86,6 +103,7 @@ def run_episode(model, vec_env, seed, max_steps=2000, visual=False, slow=False, 
         "steps": step_count,
         "traj_length": traj_length,
         "total_reward": total_reward,
+        "collision_location": collision_location,
     }
 
 
@@ -103,10 +121,17 @@ def main():
                               "(pense à réduire --n-episodes, ex: 3).")
     parser.add_argument("--slow", action="store_true", help="Ralentit encore plus la boucle visuelle.")
     parser.add_argument("--debug-angles", action="store_true",
-                         help="Imprime roll/pitch/yaw/uprightness/vitesse angulaire/alignement à chaque "
-                              "step — utile pour analyser précisément un comportement de rotation, sans "
-                              "dépendre du visuel. Combinable avec --visual, ou seul (limite --n-episodes "
-                              "à 2-3, ça imprime beaucoup de lignes).")
+                         help="Imprime roll/pitch/yaw/uprightness/vitesse angulaire/alignement/distance "
+                              "à la frontière la plus proche à chaque step — utile pour analyser "
+                              "précisément un comportement de rotation, sans dépendre du visuel. "
+                              "Combinable avec --visual, ou seul (limite --n-episodes à 2-3, ça imprime "
+                              "beaucoup de lignes).")
+    parser.add_argument("--up-z-min", type=float, default=None,
+                         help="Surcharge le seuil de retournement pour CETTE évaluation, sans "
+                              "réentraîner (par défaut : reprend celui utilisé à l'entraînement, lu "
+                              "dans metadata.json). Utile pour tester à coût nul si desserrer la marge "
+                              "change l'issue des épisodes sur un modèle déjà entraîné, avant de décider "
+                              "si ça vaut le coup de relancer un entraînement avec ce nouveau seuil.")
     args = parser.parse_args()
 
     from stable_baselines3 import PPO
@@ -126,6 +151,9 @@ def main():
           f"sur {args.n_episodes} épisodes (seeds {args.seed_start}-{args.seed_start + args.n_episodes - 1})\n")
 
     env_kwargs = meta.get("env_kwargs", {})
+    if args.up_z_min is not None:
+        env_kwargs = dict(env_kwargs)
+        env_kwargs["up_z_min"] = args.up_z_min
     if env_kwargs:
         print(f"Réglages repris de l'entraînement : {env_kwargs}")
     vec_env = DummyVecEnv([lambda: ExplorerEnv(n_rooms=(2, 4), seed=0, **env_kwargs)])
@@ -168,6 +196,12 @@ def main():
     print("\n--- Résumé ---")
     print(f"Victoire : {victoire_rate*100:.0f}%   Mort (collision) : {mort_rate*100:.0f}%   "
           f"Retourné : {retourne_rate*100:.0f}%   Timeout : {timeout_rate*100:.0f}%")
+    collisions_couloir = sum(1 for r in results if r["outcome"] == "mort" and r.get("collision_location") == "couloir")
+    collisions_piece = sum(1 for r in results if r["outcome"] == "mort" and r.get("collision_location") == "pièce")
+    total_c = collisions_couloir + collisions_piece
+    if total_c:
+        print(f"Collisions en couloir : {collisions_couloir}/{total_c} ({100*collisions_couloir/total_c:.0f}%)   "
+              f"en pièce : {collisions_piece}/{total_c} ({100*collisions_piece/total_c:.0f}%)")
     print(f"Couverture moyenne : {couverture_moy*100:.1f}% (± {couverture_std*100:.1f})")
     print(f"Trajectoire moyenne : {traj_moy:.1f} m")
     if steps_victoire_moy:

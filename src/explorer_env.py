@@ -237,6 +237,7 @@ class ExplorerEnv(gym.Env):
             "up_z": up_z,
             "vel_ang_norm": float(np.linalg.norm(vel_ang)),
             "alignement": alignement,
+            "nearest_frontier_dist": self._last_frontiers[0]["distance_norm"] if self._last_frontiers[0]["valid"] > 0 else -1.0,
         }
         return obs, float(reward), terminated, truncated, info
 

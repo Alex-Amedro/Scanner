@@ -220,6 +220,7 @@ __marimo__/
 # Generated model artifacts stay local and are not transferred.
 models/
 runs/
+*.CSV
 
 # Evaluation and TensorBoard logs are kept for transfer.
 *.png

@@ -83,6 +83,13 @@ def main():
                               "précédent avait testé une pénalité similaire (coeff_agressivite) et "
                               "observé une RÉGRESSION nette (40%%->20%% de succès) — à tester prudemment, "
                               "pas à activer par défaut sans comparaison via evaluate.py.")
+    parser.add_argument("--seed", type=int, default=None,
+                         help="Seed pour l'initialisation du modèle et la stochastique d'entraînement "
+                              "(PPO/torch). Absent jusqu'ici : chaque run repartait d'une politique "
+                              "initialisée différemment même à hyperparamètres identiques, ce qui rend "
+                              "une comparaison entre deux versions ambiguë (écart dû au changement testé, "
+                              "ou juste au tirage d'init ?). Ne fixe PAS les seeds des environnements "
+                              "d'entraînement, déjà fixes (0 à n_envs-1) indépendamment de ce paramètre.")
     args = parser.parse_args()
 
     if args.resume and args.from_version:
@@ -127,6 +134,7 @@ def main():
         )
         model = PPO("MultiInputPolicy", env, policy_kwargs=policy_kwargs,
                      n_steps=args.n_steps, batch_size=args.batch_size,
+                     seed=args.seed,
                      verbose=1, tensorboard_log=args.logdir)
 
     checkpoint_callback = mm.RotatingCheckpointCallback(
@@ -146,7 +154,8 @@ def main():
     total = base_timesteps + args.total_timesteps
     mm.save_checkpoint(args.name, version, model, env, total,
                         extra_meta={"n_envs": args.n_envs, "n_steps": args.n_steps,
-                                    "batch_size": args.batch_size, "env_kwargs": env_kwargs})
+                                    "batch_size": args.batch_size, "env_kwargs": env_kwargs,
+                                    "seed": args.seed})
     print(f"Entraînement terminé. {args.name}/{version} sauvegardé ({total} steps au total) "
           f"dans models/{args.name}/{version}/")
 
