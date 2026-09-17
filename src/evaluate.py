@@ -49,7 +49,7 @@ def run_episode(model, vec_env, seed, max_steps=2000, visual=False, slow=False, 
 
     if debug_angles:
         print(f"{'step':>4} {'roll°':>7} {'pitch°':>7} {'yaw°':>7} {'up_z':>6} "
-              f"{'v_ang':>6} {'align':>6} {'frnt_d':>6} {'reward':>7}")
+              f"{'v_ang':>6} {'align':>6} {'frnt_d':>6} {'speed':>6} {'minLid':>6} {'reward':>7}")
 
     for step_count in range(1, max_steps + 1):
         action, _ = model.predict(obs, deterministic=True)
@@ -63,6 +63,7 @@ def run_episode(model, vec_env, seed, max_steps=2000, visual=False, slow=False, 
                   f"{info.get('yaw_deg', 0):>7.1f} {info.get('up_z', 0):>6.2f} "
                   f"{info.get('vel_ang_norm', 0):>6.2f} {info.get('alignement', 0):>6.2f} "
                   f"{info.get('nearest_frontier_dist', -1):>6.2f} "
+                  f"{info.get('speed_horiz', 0):>6.2f} {info.get('min_lidar_dist', 0):>6.2f} "
                   f"{float(reward[0]):>7.2f}")
 
         pos = info.get("pos")

@@ -23,7 +23,7 @@ from occupancy_grid import OccupancyGrid
 # Seule la position de spawn change (à l'intérieur de la première pièce).
 _DRONE_XML = """
 <body name="drone_body" pos="{spawn_x} {spawn_y} {spawn_z}">
-    <joint type="free"/>
+    <joint type="free" damping="{joint_damping}"/>
     <inertial pos="0 0 0" mass="0.8" diaginertia="0.002 0.002 0.002"/>
     <geom type="box" size="0.1 0.1 0.05" rgba="0.18 0.18 0.22 1" mass="0.8"/>
     <geom type="box" pos="0 0.1 0" size="0.05 0.05 0.05" rgba="1 0.25 0.1 1"/>
@@ -65,6 +65,7 @@ class ExplorerEnv(gym.Env):
                  k_frontiers=5, n_lidar_horizontal=180, portee_lidar=15.0,
                  beta=0.5, r_exp=100.0, coverage_target=0.9,
                  gear_roll_pitch=0.5, gear_yaw=0.25, up_z_min=0.3, coeff_spin=0.0, coeff_align=0.0,
+                 joint_damping=0.0,
                  task="explore",
                  max_steps=2000, seed=None):
         super().__init__()
@@ -83,6 +84,7 @@ class ExplorerEnv(gym.Env):
         self.up_z_min = up_z_min
         self.coeff_spin = coeff_spin
         self.coeff_align = coeff_align
+        self.joint_damping = joint_damping
         self.task = task
         self.max_steps = max_steps
 
@@ -122,7 +124,8 @@ class ExplorerEnv(gym.Env):
         spawn_x, spawn_y = room0.center
         self._spawn_xy = (spawn_x, spawn_y)
         self._spawn_z = 1.2
-        drone_xml = _DRONE_XML.format(spawn_x=f"{spawn_x:.3f}", spawn_y=f"{spawn_y:.3f}", spawn_z="1.2")
+        drone_xml = _DRONE_XML.format(spawn_x=f"{spawn_x:.3f}", spawn_y=f"{spawn_y:.3f}", spawn_z="1.2",
+                                       joint_damping=self.joint_damping)
 
         actuators_xml = _ACTUATORS_XML_TEMPLATE.format(gear_rp=self.gear_roll_pitch, gear_yaw=self.gear_yaw)
 
@@ -237,6 +240,8 @@ class ExplorerEnv(gym.Env):
             "up_z": up_z,
             "vel_ang_norm": float(np.linalg.norm(vel_ang)),
             "alignement": alignement,
+            "speed_horiz": vitesse_horiz,
+            "min_lidar_dist": float(min(self._last_lidar_dists)) if self._last_lidar_dists else self.portee_lidar,
             "nearest_frontier_dist": self._last_frontiers[0]["distance_norm"] if self._last_frontiers[0]["valid"] > 0 else -1.0,
         }
         return obs, float(reward), terminated, truncated, info

@@ -83,6 +83,12 @@ def main():
                               "précédent avait testé une pénalité similaire (coeff_agressivite) et "
                               "observé une RÉGRESSION nette (40%%->20%% de succès) — à tester prudemment, "
                               "pas à activer par défaut sans comparaison via evaluate.py.")
+    parser.add_argument("--damping", type=float, default=0.0,
+                         help="Amortissement du joint libre du corps du drone (freinage physique de "
+                              "la vitesse angulaire/linéaire, indépendant de la politique — contrairement "
+                              "à coeff_spin qui est une incitation de reward). Testé seul en v4 (0.05, "
+                              "AVANT l'existence de coeff_spin) : insuffisant isolément, jamais testé "
+                              "en même temps que coeff_spin. DÉSACTIVÉ par défaut (0.0).")
     parser.add_argument("--seed", type=int, default=None,
                          help="Seed pour l'initialisation du modèle et la stochastique d'entraînement "
                               "(PPO/torch). Absent jusqu'ici : chaque run repartait d'une politique "
@@ -98,7 +104,7 @@ def main():
     env_kwargs = dict(
         task=args.task, gear_roll_pitch=args.gear_roll_pitch, gear_yaw=args.gear_yaw,
         up_z_min=args.up_z_min, coverage_target=args.coverage_target, coeff_spin=args.coeff_spin,
-        coeff_align=args.coeff_align,
+        coeff_align=args.coeff_align, joint_damping=args.damping,
     )
     env = build_vec_env(args.n_envs, args.no_subproc, env_kwargs)
 

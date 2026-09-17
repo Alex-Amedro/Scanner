@@ -24,11 +24,22 @@ def version_dir(name, version):
     return os.path.join(_name_dir(name), version)
 
 
+def _version_sort_key(v):
+    """Clé de tri numérique pour vN / vN.M — un tri alphabétique simple casse dès
+    qu'on dépasse v9 (ex: 'v9' > 'v11' en texte, alors que v11 est postérieur)."""
+    m = re.fullmatch(r"v(\d+)(?:\.(\d+))?", v)
+    if not m:
+        return (float("inf"), 0, v)  # motif inattendu : poussé en fin de liste, tri stable par nom
+    major = int(m.group(1))
+    minor = int(m.group(2)) if m.group(2) else 0
+    return (major, minor)
+
+
 def list_versions(name):
     d = _name_dir(name)
     if not os.path.isdir(d):
         return []
-    return sorted(os.listdir(d))
+    return sorted(os.listdir(d), key=_version_sort_key)
 
 
 def _major_numbers(versions):
