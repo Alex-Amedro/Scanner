@@ -46,10 +46,11 @@ def run_episode(model, vec_env, seed, max_steps=2000, visual=False, slow=False, 
     final_coverage = 0.0
     step_count = 0
     collision_location = None  # "couloir" ou "pièce", fixé à la 1ère collision de l'épisode
+    minlid_by_loc = {"couloir": [], "pièce": []} if debug_angles else None
 
     if debug_angles:
         print(f"{'step':>4} {'roll°':>7} {'pitch°':>7} {'yaw°':>7} {'up_z':>6} "
-              f"{'v_ang':>6} {'align':>6} {'frnt_d':>6} {'speed':>6} {'minLid':>6} {'reward':>7}")
+              f"{'v_ang':>6} {'align':>6} {'frnt_d':>6} {'speed':>6} {'minLid':>6} {'loc':>7} {'reward':>7}")
 
     for step_count in range(1, max_steps + 1):
         action, _ = model.predict(obs, deterministic=True)
@@ -59,12 +60,16 @@ def run_episode(model, vec_env, seed, max_steps=2000, visual=False, slow=False, 
         final_coverage = info.get("coverage", final_coverage)
 
         if debug_angles:
+            pos = info.get("pos")
+            loc = ("couloir" if _in_corridor(raw_env, pos[0], pos[1]) else "pièce") if pos else "?"
+            if loc in minlid_by_loc:
+                minlid_by_loc[loc].append(info.get("min_lidar_dist", 0))
             print(f"{step_count:>4} {info.get('roll_deg', 0):>7.1f} {info.get('pitch_deg', 0):>7.1f} "
                   f"{info.get('yaw_deg', 0):>7.1f} {info.get('up_z', 0):>6.2f} "
                   f"{info.get('vel_ang_norm', 0):>6.2f} {info.get('alignement', 0):>6.2f} "
                   f"{info.get('nearest_frontier_dist', -1):>6.2f} "
                   f"{info.get('speed_horiz', 0):>6.2f} {info.get('min_lidar_dist', 0):>6.2f} "
-                  f"{float(reward[0]):>7.2f}")
+                  f"{loc:>7} {float(reward[0]):>7.2f}")
 
         pos = info.get("pos")
         if pos is not None:
@@ -105,6 +110,7 @@ def run_episode(model, vec_env, seed, max_steps=2000, visual=False, slow=False, 
         "traj_length": traj_length,
         "total_reward": total_reward,
         "collision_location": collision_location,
+        "minlid_by_loc": minlid_by_loc,
     }
 
 
@@ -203,6 +209,15 @@ def main():
     if total_c:
         print(f"Collisions en couloir : {collisions_couloir}/{total_c} ({100*collisions_couloir/total_c:.0f}%)   "
               f"en pièce : {collisions_piece}/{total_c} ({100*collisions_piece/total_c:.0f}%)")
+    if args.debug_angles:
+        all_couloir = [v for r in results if r.get("minlid_by_loc") for v in r["minlid_by_loc"]["couloir"]]
+        all_piece = [v for r in results if r.get("minlid_by_loc") for v in r["minlid_by_loc"]["pièce"]]
+        if all_couloir:
+            print(f"minLid en couloir : médiane {np.median(all_couloir):.2f}, min {min(all_couloir):.2f} "
+                  f"(sur {len(all_couloir)} steps)")
+        if all_piece:
+            print(f"minLid en pièce   : médiane {np.median(all_piece):.2f}, min {min(all_piece):.2f} "
+                  f"(sur {len(all_piece)} steps)")
     print(f"Couverture moyenne : {couverture_moy*100:.1f}% (± {couverture_std*100:.1f})")
     print(f"Trajectoire moyenne : {traj_moy:.1f} m")
     if steps_victoire_moy:
