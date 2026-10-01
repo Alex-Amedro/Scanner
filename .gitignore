@@ -224,3 +224,10 @@ runs/
 
 # Evaluation and TensorBoard logs are kept for transfer.
 *.png
+experiments.md
+
+# Images used by the README
+!docs/*.png
+requirements_runner.txt
+src/train.py
+src/train.py

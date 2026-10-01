@@ -86,6 +86,7 @@ def main():
 
     from stable_baselines3.common.vec_env import VecNormalize
 
+    import torch
     import model_manager as mm
 
     from feature_extractor import ExplorerFeaturesExtractor
@@ -103,6 +104,8 @@ def main():
                          help="Repart des poids de cette version, dans une nouvelle version dérivée (ex: v1 -> v1.1).")
 
     parser.add_argument("--n-envs", type=int, default=8)
+    parser.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto",
+                        help="Device PyTorch/SB3 : auto (CUDA si disponible), cuda ou cpu.")
 
     parser.add_argument("--total-timesteps", type=int, default=2_000_000,
 
@@ -260,6 +263,20 @@ def main():
 
     args = parser.parse_args()
 
+    if args.device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA demandé mais indisponible (vérifier torch.cuda.is_available()).")
+    device = args.device
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Device sélectionné : {device}"
+          + (f" ({torch.cuda.get_device_name(0)})" if device == "cuda" else ""))
+
+    n_cpu = os.cpu_count() or 1
+    print(f"CPU logiques : {n_cpu}, environnements parallèles : {args.n_envs}")
+    if args.n_envs > n_cpu:
+        print(f"⚠️ --n-envs ({args.n_envs}) dépasse le nombre de CPU logiques ({n_cpu}) : "
+              "les workers vont se disputer les cœurs.")
+
 
 
     if args.resume and args.from_version:
@@ -324,7 +341,7 @@ def main():
 
         env = VecNormalize.load(paths["vecnormalize"], env)
 
-        model = PPO.load(paths["model"], env=env)
+        model = PPO.load(paths["model"], env=env, device=device)
 
         base_timesteps = meta.get("total_timesteps", 0)
 
@@ -373,7 +390,7 @@ def main():
 
         env = VecNormalize.load(src_paths["vecnormalize"], env)
 
-        model = PPO.load(src_paths["model"], env=env)
+        model = PPO.load(src_paths["model"], env=env, device=device)
 
 
 
@@ -426,7 +443,7 @@ def main():
 
                      n_steps=args.n_steps, batch_size=args.batch_size,
 
-                     seed=args.seed,
+                     seed=args.seed, device=device,
 
                      verbose=1, tensorboard_log=args.logdir)
 
