@@ -53,7 +53,6 @@ def main():
     print(f"Bâtiment généré : {len(env.layout.rooms)} pièces")
     print(f"Grille : {env.grid.width}x{env.grid.height} cellules "
           f"({env.grid_resolution} m/cellule)")
-    print(f"Survivant placé en {env.survivor_xy}")
     print(f"Formes d'observation : "
           f"{ {k: v.shape for k, v in obs.items()} }")
 
@@ -69,7 +68,7 @@ def main():
 
         if i % print_every == 0:
             print(f"step {i:4d} | couverture={info['coverage']*100:5.1f}% "
-                  f"| reward={reward:+.3f} | dist_survivant={info['distance_survivant']:.2f}m "
+                  f"| reward={reward:+.3f} "
                   f"| frontières valides={sum(f['valid'] for f in env._last_frontiers)}")
 
         if terminated or truncated:

@@ -108,7 +108,7 @@ def main():
     check("diagonale pleine : |v| <= max_speed", v <= env.max_speed + 0.3, f"(|v|={v:.2f}, max={env.max_speed})")
 
     # 8. lissage + last_action
-    env = fresh_env()
+    env = fresh_env(action_smoothing_alpha=0.3)
     obs, *_ = env.step(np.array([1, 0, 0, 0], dtype=np.float32))
     check("last_action = EMA de l'action", abs(obs["last_action"][0] - env.action_smoothing_alpha) < 1e-6,
           f"({obs['last_action']})")

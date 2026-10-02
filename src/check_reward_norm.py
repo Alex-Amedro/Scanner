@@ -29,7 +29,7 @@ def main():
     meta = mm.read_metadata(args.name, version)
     env_kwargs = meta.get("env_kwargs", {})
 
-    vec_env = DummyVecEnv([lambda: ExplorerEnv(n_rooms=(2, 4), seed=0, **env_kwargs)])
+    vec_env = DummyVecEnv([lambda: ExplorerEnv(seed=0, **{"n_rooms": (2, 4), **env_kwargs})])
     vec_env = VecNormalize.load(paths["vecnormalize"], vec_env)
 
     ret_var = float(vec_env.ret_rms.var)

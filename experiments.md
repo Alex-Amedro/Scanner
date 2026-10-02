@@ -785,12 +785,19 @@ seront v2.1, v2.2… Les comparaisons à v12/v16 restent indicatives seulement.
   (0 processus orphelin) et par une courbe `ram/*` dans tensorboard : 2,65 -> 2,71 Go sur 40k steps,
   pas de fuite. Coût mesuré : ~70 Mo par worker ; le gros poste est le processus principal (torch)
   et le rollout buffer (le crop 3x64x64 pèse 48 Ko par step).
+- **Recalibrage du garde-fou (après un refus abusif : « 1 env = 4,8 Go » avec 6,2 Go libres)** : la
+  1re calibration utilisait la RAM *résidente* des processus, qui compte plusieurs fois les
+  bibliothèques partagées entre workers (~1,5x trop haut). Recalé sur la baisse réelle de RAM
+  disponible : CPU 8 envs ~3,3 Go, CUDA 10 envs ~6,5 Go (estimations maintenant 3,5 et 6,6 Go).
+  `--ram-reserve-gb` passe à 1,0. **`--device auto` choisit maintenant le CPU** : mesuré 814 fps en
+  CUDA (10 envs) contre 807 fps en CPU (8 envs), le goulot étant la physique des envs ; CUDA coûte
+  ~2,6 Go de RAM en plus. `--device cuda` pour le forcer.
 - `train.py` : les emojis/« ≈ » des messages faisaient planter le programme en console Windows
   cp1252 (y compris `--help`) : sortie reconfigurée en `errors="replace"`.
 - Bug corrigé : `RotatingCheckpointCallback` comptait `base_timesteps` deux fois après `--resume`.
 - Budget d'entraînement : **500k steps**, pas 1M. Les anciennes versions plafonnaient dès ~400k.
 
-## v2.0 (ex-v20) — refonte groupée reward + observations pour le contrôle en vitesse (CODE PRÊT, À LANCER)
+## v2.0 (ex-v20) — refonte groupée reward + observations pour le contrôle en vitesse (lissage d'action 0,3 = ÉCHEC ; sans lissage = 60% de victoires, cf. ablations)
 
 **Changements groupés (assumé — pas à variable unique, cohérent avec la décision prise après
 l'incident v11 : parfois plusieurs changements liés à une même cause doivent être testés ensemble)** :
@@ -859,6 +866,259 @@ python train.py --name explorer --damping 0.05 --death-penalty 500 --max-speed 6
 l'ancien contrôle en couple à budget comparable, et si le comportement "errant" de v19 a disparu
 (`--debug-angles` sur quelques épisodes, `--max-steps 400` pour éviter des traces trop longues).
  
+### Résultat v2.0 — ÉCHEC (nettement pire que la génération 1)
+
+Entraînement : 501 760 steps, **10 envs** (le garde-fou a réduit de 16 à 10 : 7,4 Go libres), CUDA,
+RAM stable à ~7,25 Go sur toute la durée (pas de fuite), fin propre. Évaluation 30 épisodes
+(seeds 9000-9029) : **3% victoire, 83% mort, 0% retourné, 13% timeout, couverture 64,0% (± 12,6)**,
+trajectoire moyenne 26 m. Contre v16 (60/37/3/81) et v18 (67/20/13/82). **100% des morts en pièce**.
+
+**Ce qui est réglé** : 0% de retournement, roll/pitch bornés à ~±25° (la cascade fait son travail).
+
+**Courbes d'entraînement** : `coverage_mean` plate à 0,6-0,7 du début à la fin (aucune progression),
+victoires ~0%, `timeout_rate` jusqu'à 87% vers 215k-300k puis les collisions reviennent (~50%) ;
+`std` de la politique encore à 0,61 à la fin (exploration pas retombée), 49 mises à jour PPO au total.
+
+**Mécanisme observé** (`--debug-angles`, seeds 9007 et 9019, morts en 91 et 110 steps, 2-3 m
+parcourus) : le drone décrit une dérive lente et périodique (roll et pitch en sinusoïdes déphasées,
+période ~60 steps = 1,2 s, soit une spirale en espace de vitesses), avec `alignement` ≈ -0,7 (il se
+déplace à reculons / en crabe par rapport à son cap) à 2-2,7 m/s, et `minLid` passe de ~2 m à 0,14 m
+en ~40 steps **sans aucun freinage**, alors que la frontière la plus proche est à ~0,2. Récompense ~0
+pendant 90 steps puis -4 (mort). La politique ne réagit pas au mur ; le comportement ressemble à un
+cycle limite plutôt qu'à de l'errance aléatoire.
+
+**Hypothèses initiales** : cycle limite via `last_action`, budget trop court, horizon `gamma` trop
+court, `kp_vel` trop faible. **Aucune n'était la bonne** — voir l'ablation ci-dessous.
+
+### Ablations de v2.0 — le lissage d'action était le coupable
+
+Le temps d'un entraînement complet n'est que de ~10 min (814 fps), donc au lieu de deviner :
+5 runs identiques (500k steps, seed 42, 8 envs CPU, mêmes 30 épisodes d'évaluation), UN réglage
+changé à chaque fois (scripts et logs supprimés depuis ; les résultats sont dans le tableau) :
+
+| Run | Victoire | Mort | Timeout | Couverture |
+|---|---|---|---|---|
+| base v2.0 (lissage 0,3, potentiel 30, `last_action`, crop ego) | 7% | 63% | 30% | 65,8% |
+| `--coeff-potential 1` | 7% | 83% | 10% | 65,2% |
+| `--no-last-action` | 3% | 87% | 10% | 66,1% |
+| **`--action-smoothing-alpha 1.0` (sans lissage)** | **60%** | **37%** | **3%** | **80,1%** |
+| `--no-ego-crop` | 7% | 83% | 10% | 69,3% |
+
+Toutes les variantes AVEC lissage restent à 3-7% de victoires ; la seule sans lissage retrouve
+**60/37/0/3 (0% de retournement), couverture 80%, au niveau de v16** (60/37/3/81) avec le nouveau
+contrôle en vitesse. Un seul seed par config, mais 60% contre 3-7% sur quatre configs est bien
+au-delà du bruit.
+
+**Pourquoi (hypothèse, non prouvée)** : avec l'EMA, l'action que la politique choisit ne pèse que
+30% sur la consigne réellement appliquée, et la boucle de vitesse est déjà un passe-bas (0,68 s) :
+le signal action -> récompense est dilué et retardé, et le gradient PPO n'a presque rien à
+attribuer. La trace de la politique entraînée (actions ~bruit, moyenne ~0, rotation de lacet
+constante) correspond à une politique qui n'a rien appris, pas à un contrôle défaillant. Le
+raisonnement d'origine (« le PID annule le mouvement que le bruit PPO vient de créer ») était faux :
+le plant lisse déjà tout seul. **Leçon** : un lissage d'action entre la politique et l'env n'est pas
+gratuit pour PPO ; ne pas en mettre sans l'avoir testé seul.
+
+**Décision** : `action_smoothing_alpha` passe à **1.0 par défaut** (train.py et env). (Les modèles d'ablation et `explorer/v2` ont été supprimés.) Les autres ajouts de v2.0 (potentiel 30, crop égocentrique, `last_action`,
+proximité 0,3, kinematics en repère corps) sont dans ce run à 60% mais **leur utilité propre n'est
+pas démontrée** : les ablations ci-dessus étaient confondues avec le lissage. À refaire autour de
+`abl_nosmooth` si on veut savoir lesquels aident.
+
+### Batterie 2 — autour du run SANS lissage (350k steps, seed 42, 8 envs CPU, 30 épisodes)
+
+Un réglage change à chaque fois par rapport au témoin (scripts et logs supprimés depuis). Budget raccourci à 350k : les runs précédents plafonnaient déjà.
+
+| Run | Ce qui change | Victoire | Mort | Timeout | Couverture |
+|---|---|---|---|---|---|
+| **control** | rien (sans lissage, potentiel 30, `last_action`, crop ego, proximité 0,3) | **70%** | 27% | 3% | 82,7% |
+| potential1 | `--coeff-potential 1` | 53% | 47% | 0% | 85,0% |
+| **nolast** | `--no-last-action` | **3%** | 57% | 40% | 63,9% |
+| **noegocrop** | `--no-ego-crop` | **3%** | 63% | 33% | 66,0% |
+| **noproximity** | `--coeff-proximity 0` | **77%** | 23% | 0% | 86,3% |
+| speed3 | `--max-speed 3` | 3% | 83% | 13% | 57,0% |
+
+Le témoin à 350k (70%) fait déjà mieux que le run sans lissage à 500k (60%) : le budget n'était pas le
+problème, et le bruit d'un run à l'autre est de l'ordre de ±10 points (un seed, 30 épisodes).
+
+**Lecture (prudente, UN seed par config)** :
+- **Entrées `last_action` et crop égocentrique : semblent indispensables** (70% -> 3% en les
+  retirant, avec ~40% de timeouts : la politique tourne en rond au lieu d'explorer). Cohérent avec
+  la physique : un crop aligné sur le monde est ininterprétable sans le yaw, et avec un contrôle en
+  vitesse la politique a besoin de savoir ce qu'elle poursuit déjà.
+- **Pénalité de proximité : aucune preuve qu'elle aide** (77% sans, 70% avec : dans le bruit). Elle a
+  déjà fait du mal en v13. Retirée de la commande recommandée.
+- **Potentiel 30 vs 1 : pas de différence claire** (70% vs 53%, dans le bruit) ; laissé à 30.
+- **`max_speed=3` : très mauvais (3%)**, contre-intuitif (plus lent = plus dangereux ?). Les runs à 3%
+  forment peut-être un mode d'échec « la politique ne démarre pas » plutôt qu'un vrai effet ; à
+  confirmer avec un 2e seed avant d'en tirer une conclusion sur `max_speed`.
+- **Limite importante** : les trois runs à 3% (nolast, noegocrop, speed3) peuvent aussi être de la
+  malchance d'init (distribution bimodale ?). Un 2e seed (43) sur control / nolast / noegocrop
+  trancherait. Non fait.
+
+**Config recommandée (v2.1)** : défauts actuels (sans lissage) SANS `--coeff-proximity`, 350k steps :
+```
+python train.py --name explorer --damping 0.05 --death-penalty 500 --max-speed 6.0 --seed 42 --total-timesteps 350000
+```
+(Le modèle `abl2_noproximity` à 77% a été supprimé avec les autres ablations.)
+
+**Pistes non testées** : bloquer l'altitude (la tâche est plane, le LiDAR aussi, et `vz` ne sert qu'à
+mourir au sol/plafond) ; 2e seed ; `--substeps 25`.
+
+### Batterie 3 et verdict : le setup est fragile, on reprend par étapes
+
+Config « recommandée v2.1 » lancée par l'utilisateur (`explorer/v3`, 14 envs, 500k) : **3% victoire, 53% mort,
+43% timeout, couverture 65%** — l'échec, avec la même signature que les « runs ratés » des ablations
+(timeouts 40-60% à partir de ~200k steps, couverture plate). Bilan sur 7 runs sans lissage : 3 réussissent
+(53/70/77%), 4 échouent (~3%). **La conclusion « last_action / crop ego indispensables » de la batterie 2
+est donc à jeter** : ces runs à 3% sont probablement de la malchance, la config normale échoue aussi.
+Un essai `--time-penalty 0.1` (seed 43) : 0% victoire, 70% mort, 30% timeout -> pas de correction ;
+interrompu à la demande (flag `--time-penalty` laissé dans le code, défaut 0).
+
+**Fait clé mesuré** : couverture AU SPAWN (le LiDAR voit toute la 1re pièce + un bout de couloir) =
+**95% à 1 pièce, 59% à 2, 40% à 3, 30% à 4**. Les runs à ~64% de couverture n'ont donc quasiment rien
+exploré au-delà du départ : **le problème tout entier est de franchir les portes** (couloirs 1,6 m,
+désaxés). Tout le reste (récompenses annexes, lissage...) n'est qu'un détail à côté.
+
+## PLAN DE REPRISE — retrouver d'où vient le problème, étape par étape
+
+**Règles** : (1) on part du plus simple possible et on n'ajoute RIEN sans preuve (le lissage « évident »
+a tout cassé) ; (2) chaque étape a un critère de passage chiffré, sinon on ne passe pas à la suivante ;
+(3) un run isolé ne prouve rien (même config = réussite ou échec) -> on juge sur le signal à 100-150k
+steps (`episodes/coverage_mean` doit dépasser nettement la couverture au spawn, `timeout_rate` ~0)
+et on ne « garde » un élément qu'avec 2 seeds ; (4) un seul changement par test.
+
+**Étape 0 — Outillage** : `test_env.py --visual` réparé (restes de l'ancien projet) ; un script de sonde
+qui joue une politique scriptée pour vérifier que l'env est franchissable ; log du % de temps passé dans
+la 1re pièce (le vrai indicateur d'échec).
+
+**Étape 1 — Audit des entrées, une par une** (garder / retirer, avec la raison) :
+| Entrée | Question | Avis a priori |
+|---|---|---|
+| `proximity_rays` (16, ego) | seule info directe « mur à X m dans cette direction » | GARDER |
+| `frontier_vector` (5x4) | la frontière « la plus proche » est en ligne droite et peut être DERRIÈRE un mur (vue au pilote scripté : cibles à 3-4 m à travers le mur, porte ailleurs) ; 1-2 frontières suffisent ? distance par chemin (BFS) ? | À TESTER (suspect n°1) |
+| `kinematics` (10) | roll/pitch/up_z/altitude : le PID stabilise déjà, le réseau n'en a pas besoin | GARDER vitesse corps + vitesse de lacet, RETIRER le reste |
+| `relief_rays` (18) | rayons verticaux, tâche plane | RETIRER |
+| `coverage` (1) | scalaire global, ne dit pas où aller | RETIRER |
+| `local_crop` (CNN 3x64x64) | mémoire spatiale, mais plus gros et plus risqué ; sans lui le réseau est un petit MLP | RETIRER d'abord, réintroduire à l'étape 5 |
+| `last_action` | utilité non démontrée | tester à l'étape 5 |
+
+**Étape 2 — Sorties** : 3 sorties (vx, vy, vitesse de lacet), altitude bloquée : `vz` ne sert qu'à mourir au
+sol/plafond (LiDAR à plat). `max_speed` revu à la lumière des pièces de 4-7 m.
+
+**Étape 3 — Récompenses minimales, uniquement celles dont l'utilité est certaine** : (a) cellules
+nouvellement découvertes (c'est l'objectif lui-même), (b) pénalité de mort, (c) bonus de victoire.
+Rien d'autre : ni potentiel, ni proximité, ni spin, ni alignement, ni vitesse, ni temps.
+
+**Étape 4 — Échelle de difficulté** (le test le plus informatif ; il n'existe pas de palier « 1 pièce », la
+couverture y est de 95% au spawn) : (a) 2 pièces exactement, (b) 2 à 3, (c) 2 à 4. Critère : >= 70%
+de victoire à 150-200k steps. Un palier qui échoue localise le problème. Demande de petites modifs :
+flags `--n-rooms-min/max` (aujourd'hui `(2, 4)` en dur dans `train.py`).
+
+**Étape 5 — Réintroduire UN élément à la fois**, dans cet ordre : `last_action`, crop CNN ego, potentiel de
+frontière, puis le reste. Chaque élément : critère de gain mesuré, 2 seeds, sinon retiré pour de bon.
+
+**Étape 6 — Si l'étape 4a échoue encore** (hypothèses ciblées, après vérification) : frontière à travers
+les murs ; hyperparamètres PPO (seulement ~30-50 mises à jour PPO dans un run, `n_steps`, `lr`,
+`ent_coef`, `gamma`) ; normalisation du reward (clip à 10 : une découverte de 180 cellules et une mort
+à -500 sont toutes deux écrasées au même niveau tant que l'écart-type est petit) ; taille du réseau.
+
+### Reprise par étapes — ce qu'on a trouvé (entrées minimales, 3 pièces)
+
+**Mise en place** : entrées minimales (`proximity_rays`, `frontier_vector` x2, `velocity`), altitude bloquée,
+3 pièces fixes, récompense = cellules découvertes + mort + victoire. Flags ajoutés : `--obs-keys`,
+`--k-frontiers`, `--free-altitude`, `--n-rooms-min/max`, `--no-yaw`, `--coeff-progress`, `--time-penalty`.
+`--device auto` = CPU, garde-fou RAM recalibré (cf. plus haut).
+
+**1. Run minimal `min3rooms` (mort -500, 150k steps)** : 0 victoire, couverture ~0,6-0,7 plate,
+timeouts 17-43%. Sonde des actions : commandes faibles (|a| moyen 0,2 = ~1 m/s), jamais saturées,
+un changement de signe tous les ~33 steps (balancement ~1,3 s), cap qui dérive de -39 à +138 deg.
+**2. Pilote scripté** n'utilisant QUE ces entrées (frontière -> direction, ralentit près des murs) :
+27-40% de victoires sur 30 bâtiments à 3 pièces -> **l'information minimale suffit** ; c'est
+l'apprentissage qui échoue. (Au spawn, la frontière la plus proche n'est derrière un mur que dans 3%
+des cas : l'hypothèse « frontière à travers les murs » est écartée.)
+**3. Cause trouvée : l'échelle des récompenses.** `ret_rms.std` ~ 145 : après normalisation, la mort
+(-500) vaut **-3,4** pour le réseau, une progression d'un step vers une porte +0,004 à +0,03, 8 cellules
++0,05. Un trajet parfait de 100 steps rapporte moins qu'une mort -> rester sur place est optimal. C'est
+le « il reste dans la pièce / il oscille en esquivant les murs » depuis le début, et la pénalité de mort
+de 500 traînait dans toutes les commandes sans que son poids réel ait été mesuré.
+
+**4. Résultats à 150k steps (30 épisodes, 3 pièces, entrées minimales, sans lacet)** :
+| Run | Victoire | Mort | Timeout | Couverture |
+|---|---|---|---|---|
+| mort -500 + but dense | 7% | 77% | 17% | 68% |
+| **mort -50 + but dense (`--coeff-progress 10`)** | **17%** | 83% | 0% | **79%** |
+| mort -20 + but dense | 10% | 90% | 0% | 70% |
+| mort -50, sans but dense | 0% | 100% | 0% | 71% |
+Mort moins pénalisée = plus de timeouts (il avance) ; but dense = c'est lui qui fait progresser (79%
+contre 71%, 17% contre 0% de victoire). Morts à 92% en pièce.
+**5. Prolongé à 360k steps (150k + 200k via `--resume`), mort -50 + but dense + sans lacet** :
+3 pièces : **60% victoire / 40% mort / 0% timeout, couverture 86,3%**, 182 steps pour gagner. Courbe
+d'apprentissage RÉGULIÈRE : victoires 0 -> 31% -> 65% et collisions 100% -> 69% -> 35% par tiers
+d'entraînement, pas d'effondrement. **Généralisation, évalué sur 2 à 4 pièces (la vraie tâche) :
+63% victoire / 37% mort / 0% timeout, couverture 85,2%**, avec seulement 3 entrées (rayons de proximité,
+2 frontières, vitesse), AUCUN CNN, 2 sorties (vx, vy), récompense = cellules + progression + mort + victoire.
+**Un seul run (seed 42)** : à confirmer avec un 2e seed avant d'en faire une règle.
+Modèle conservé : `src/models/goal2_d50/v1` (les autres runs de cette série ont été supprimés).
+
+Commande équivalente pour le refaire d'un coup (défauts : entrées minimales, 3 pièces, altitude bloquée) :
+```
+python train.py --name explorer --damping 0.05 --death-penalty 50 --coeff-progress 10 --no-yaw --max-speed 6.0 --seed 42 --total-timesteps 350000 --device cpu --n-envs 8
+python evaluate.py --name explorer --n-episodes 30 --n-rooms-min 2 --n-rooms-max 4
+```
+
+**Correctif `--no-yaw` (signalé à l'oeil par l'utilisateur : « le lacet dérive naturellement vers la droite »)** :
+reproduit, cap jusqu'à **-18 deg** (extrêmes -18/+7) pendant des manoeuvres. Cause : la cascade ne régule que
+la VITESSE de lacet, aucune boucle sur l'ANGLE. Ajout d'un maintien de cap (P sur l'angle, `yaw_hold_kp=4`) :
+extrêmes **-4/+3 deg**. NB : `goal2_d50` a été entraîné AVANT ce correctif (avec la dérive) ; ses résultats
+(60%/63%) ne sont donc pas strictement ceux de la dynamique actuelle.
+**Mesures de freinage** (contacts désactivés, `kp_vel=1.5`, tilt 35 deg) : arrêt depuis 3 m/s en 1,8 m / 1,1 s,
+depuis 6 m/s en 4,0 m / 1,2 s ; `kp_vel=3` : 1,3 m et 3,8 m ; tilt 55 deg + `kp_vel=3` : 2,7 m depuis 6 m/s mais
+dépassement de vitesse ~1 m/s. Les morts de `goal2_d50` ont lieu à ~3,7 m/s en moyenne, surtout dans la 2e pièce
+(8/12). Levier le plus efficace attendu : `--max-speed` (distance d'arrêt en v au carré). Non testé.
+**CNN ajouté seul (`cnn1`, 350k)** : 10% victoire / couverture 69% (3 pièces), 17% / 72% (2-4 pièces), contre
+60% / 86% sans CNN ; plafonne à 18% de victoires dès le 3e quart. Un seul run.
+
+**Témoin avec cap corrigé (`ctrl6`, config de `goal2_d50`, `--max-speed 6`, 350k, seed 42)** : **83% victoire / 17% mort
+(3 pièces), 80% / 20% (2-4 pièces), couverture 86% / 85%**, ~195 steps pour gagner. Contre 60% / 63% pour `goal2_d50`
+(sans maintien de cap) : le défaut de dérive de cap pesait environ 20 points. Courbe régulière : victoires
+0 -> 8 -> 43 -> 62% par quart. Un seul run.
+**`--max-speed 3` (`speed3`, même config)** : **0% victoire / 100% mort** sur 3 pièces comme sur 2-4, couverture 64%,
+collisions à 98% pendant TOUT l'entraînement (aucun apprentissage de l'évitement) alors que `explained_variance`
+atteint 0,91. Contre-intuitif (plus lent devrait aider) et déjà vu une fois (3% avec l'ancienne échelle de
+récompense). **Cause non identifiée.** Trace : le drone fonce droit vers un mur à ~2,5 m/s, `minLid` passe de 2,4 m
+à 0,2 m en ~90 steps sans freiner. Conclusion pratique : ne pas réduire `max_speed` ; `ctrl6` (6 m/s) est la
+référence. Les autres leviers de freinage (`--kp-vel 3`, `--max-tilt-angle-deg 45`) restent non testés.
+
+**Lecture** : les deux comptent. À vérifier ensuite : budget plus long, `max_speed`, puis réintroduire
+`last_action` / crop / potentiel UN par un avec le critère ci-dessus (étape 5 du plan).
+
+## FEUILLE DE ROUTE (v2) — objectif : une vidéo qui marche, un drone qui visite un bâtiment et produit une carte pour les pompiers
+
+**Objectif de fin** : vidéo d'un drone devant un bâtiment qui le visite seul et construit une carte utilisable ; projet fiable
+et présentable (CV). **Principe** : on ne casse jamais ce qui marche : `ctrl6` (83% / 80%) est figé comme modèle de secours,
+chaque étape part d'une copie et ne devient la référence que si elle fait au moins aussi bien, sur 2 seeds au minimum.
+
+| # | Étape | Pourquoi | Taille | Critère de passage |
+|---|---|---|---|---|
+| 0 | Verrouiller la base : `ctrl6` en 2e seed, commit | un seul run ne prouve rien ici | S (en fond) | >= 70% sur les deux seeds |
+| 1 | Réactivité : `--kp-vel 3` + `--max-tilt-angle-deg 45` | passer de +6 à -6 m/s : 2,0 s -> 1,4 s (mesuré) | S | >= `ctrl6`, mouvement plus vif à l'oeil |
+| 2 | Lacet : décision (cf. plus bas) | ne sert à rien pour un LiDAR 360 deg ; sert pour un capteur directionnel et pour la vidéo | S/M | pas pire que le cap fixe |
+| 3 | Cibles de réussite : 95% puis 98% de couverture | on est à ~85% de moyenne pour 90% demandé ; plafond à mesurer proprement | S | taux de victoire maintenu |
+| 4 | Cartes plus dures : générateur v2 | couloir central avec salles à gauche ET à droite, plusieurs sorties, impasses, boucles, salles plus grandes/longues | L | paliers : T/H simple -> grandes salles -> boucles |
+| 5 | Mémoire : réintroduire CNN (petite carte locale), `coverage`, `last_action`, un par un | avec des branches il faut se souvenir des salles faites ; le CNN n'a pas marché (10-17%) sur la carte actuelle, à retester sur les cartes à branches | M | un gain mesuré, sinon retiré |
+| 6 | Carte de précision (pompiers) | couche SÉPARÉE du RL : carte haute résolution construite pendant le vol (mêmes tirs, plus denses), métrique de qualité vs plan réel, export d'un plan propre | M | précision/rappel des murs ; image nette |
+| 7 | Vidéo + README/CV | rendu 3e personne + carte qui se construit à côté, tableau de résultats multi-seeds, limites assumées | M | vidéo reproductible par une commande |
+| ! | Vidéo de SECOURS dès l'étape 0/1 | avoir quelque chose qui marche tout de suite avec `ctrl6` sur les cartes actuelles | S | un mp4 propre |
+
+**À propos du lacet (décision à prendre)** : pour la navigation seule avec un LiDAR à 360 deg il est inutile (le cap fixe a donné
+80%). Il redevient utile (a) avec un capteur DIRECTIONNEL (le LiDAR « de précision », une caméra) et (b) pour la VIDÉO : un drone qui
+vole en crabe est étrange, face à sa direction c'est naturel. Proposition : pas une sortie du réseau (il reste à 2 sorties) ;
+le contrôleur bas niveau fait tourner le cap vers la direction de déplacement, lissé. À tester contre le cap fixe avec la même méthode.
+Idée de LiDAR à plus longue portée : sans intérêt sur des pièces de 4-7 m (portée déjà 15 m), utile seulement avec de grands halls.
+
+**Risques assumés** : (1) variance d'un run à l'autre -> toute affirmation dans le README sera sur >= 2 seeds ; (2) les cartes à
+branches changent la nature du problème (mémoire), donc un modèle entraîné sur chaînes de pièces ne se transférera pas tel quel ;
+(3) `max_speed=3` échoue de façon inexpliquée -> on garde 6 m/s.
+
 ## Revue de code externe (deux documents, model-level + code review) — pistes non testées, pour mémoire
  
 Deux revues obtenues via un autre outil (pas testées empiriquement, à prioriser plus tard) :

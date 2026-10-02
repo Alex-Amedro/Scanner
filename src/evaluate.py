@@ -130,6 +130,9 @@ def main():
                               "précisément un comportement de rotation, sans dépendre du visuel. "
                               "Combinable avec --visual, ou seul (limite --n-episodes à 2-3, ça imprime "
                               "beaucoup de lignes).")
+    parser.add_argument("--n-rooms-min", type=int, default=None,
+                        help="Surcharge le nombre min de pièces (défaut : celui de l'entraînement).")
+    parser.add_argument("--n-rooms-max", type=int, default=None)
     parser.add_argument("--up-z-min", type=float, default=None,
                          help="Surcharge le seuil de retournement pour CETTE évaluation, sans "
                               "réentraîner (par défaut : reprend celui utilisé à l'entraînement, lu "
@@ -160,7 +163,13 @@ def main():
         env_kwargs["up_z_min"] = args.up_z_min
     if env_kwargs:
         print(f"Réglages repris de l'entraînement : {env_kwargs}")
-    vec_env = DummyVecEnv([lambda: ExplorerEnv(n_rooms=(2, 4), seed=0, **env_kwargs)])
+    env_kwargs = dict(env_kwargs)
+    env_kwargs.setdefault("n_rooms", (2, 4))  # modèles historiques : 2 à 4 pièces
+    if args.n_rooms_min is not None or args.n_rooms_max is not None:
+        lo, hi = env_kwargs["n_rooms"]
+        env_kwargs["n_rooms"] = (args.n_rooms_min or lo, args.n_rooms_max or hi)
+    print(f"Pièces par bâtiment : {tuple(env_kwargs['n_rooms'])}")
+    vec_env = DummyVecEnv([lambda: ExplorerEnv(seed=0, **env_kwargs)])
     try:
         vec_env = VecNormalize.load(paths["vecnormalize"], vec_env)
     except AssertionError as e:

@@ -16,12 +16,16 @@ except ImportError:  # le garde-fou se désactive, l'entraînement continue
 
 GB = 2 ** 30
 
-# Coût mesuré d'un worker SubprocVecEnv (mujoco + gymnasium + numpy, sans torch) : ~70-100 MB.
+# Constantes calibrées sur la baisse réelle de RAM DISPONIBLE du système pendant un entraînement
+# (CPU, 8 envs : ~3,3 Go ; CUDA, 10 envs : ~6,5 Go), PAS sur la RAM "résidente" des processus : elle
+# compte plusieurs fois les bibliothèques partagées entre workers (~1,5x trop haut, d'où une
+# première calibration trop pessimiste, qui refusait de lancer 1 seul env avec 6 Go libres).
+# Coût d'un worker SubprocVecEnv (mujoco + gymnasium + numpy, sans torch) : ~70-100 MB.
 # Marge large pour les pics de reset (génération du bâtiment, MjModel).
-WORKER_GB = 0.20
+WORKER_GB = 0.22
 # Processus principal une fois torch/SB3 importés, hors rollout buffer (+ contexte CUDA côté hôte).
-MAIN_BASE_GB_CPU = 1.5
-MAIN_BASE_GB_CUDA = 3.0
+MAIN_BASE_GB_CPU = 1.2
+MAIN_BASE_GB_CUDA = 3.7
 # Le rollout buffer de SB3 stocke l'observation complète de chaque step, plus des copies transitoires.
 BUFFER_OVERHEAD = 1.5
 

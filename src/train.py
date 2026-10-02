@@ -42,7 +42,7 @@ from explorer_env import ExplorerEnv
 
 
 
-NORM_OBS_KEYS = ["coverage", "frontier_vector", "relief_rays", "kinematics", "proximity_rays"]  # pas local_crop (déjà 0/1)
+NORM_OBS_KEYS = ["coverage", "frontier_vector", "relief_rays", "kinematics", "proximity_rays", "velocity"]  # pas local_crop (déjà 0/1)
 
 
 
@@ -52,7 +52,7 @@ def make_env_fn(seed, env_kwargs):
 
     def _init():
 
-        return ExplorerEnv(n_rooms=(2, 4), seed=seed, **env_kwargs)
+        return ExplorerEnv(seed=seed, **env_kwargs)
 
     return _init
 
@@ -116,7 +116,7 @@ def main():
     parser.add_argument("--n-envs", type=int, default=16,
                         help="Environnements parallèles DEMANDÉS. Réduit automatiquement si la RAM libre "
                              "ne suffit pas (cf. --ram-reserve-gb), sauf avec --no-ram-guard.")
-    parser.add_argument("--ram-reserve-gb", type=float, default=1.5,
+    parser.add_argument("--ram-reserve-gb", type=float, default=1.0,
                         help="RAM libre minimale à laisser au système/aux autres programmes. Sert à "
                              "dimensionner --n-envs au lancement ; l'arrêt d'urgence propre (sauvegarde "
                              "puis sortie) se déclenche si la RAM libre passe sous la moitié de cette valeur.")
@@ -126,7 +126,7 @@ def main():
     parser.add_argument("--no-ram-guard", action="store_true",
                         help="Désactive l'adaptation de --n-envs et la surveillance de la RAM.")
     parser.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto",
-                        help="Device PyTorch/SB3 : auto (CUDA si disponible), cuda ou cpu.")
+                        help="Device PyTorch/SB3 : auto (= cpu, aussi rapide ici et ~2,6 Go de RAM en moins), cuda ou cpu.")
 
     parser.add_argument("--total-timesteps", type=int, default=2_000_000,
 
@@ -256,9 +256,10 @@ def main():
 
                               "la politique paie le coût et accélère quand même).")
 
-    parser.add_argument("--action-smoothing-alpha", type=float, default=0.3,
-                        help="Lissage exponentiel de l'action brute PPO (1.0 = aucun lissage).")
-    parser.add_argument("--coeff-potential", type=float, default=30.0,
+    parser.add_argument("--action-smoothing-alpha", type=float, default=1.0,
+                        help="Lissage exponentiel de l'action brute PPO (1.0 = aucun lissage, DÉFAUT). "
+                             "0.3 a cassé l'apprentissage en v2.0 (3%% de victoires contre 60%% sans lissage).")
+    parser.add_argument("--coeff-potential", type=float, default=0.0,
                         help="Poids du terme de potentiel de frontière (phi - last_phi) dans le reward. "
                              "À 1.0 il est ~200-1000x plus petit que n_new_cells et ne guide rien.")
     parser.add_argument("--substeps", type=int, default=10,
@@ -267,6 +268,27 @@ def main():
     parser.add_argument("--no-ego-crop", action="store_true",
                         help="Garde le crop de grille aligné sur les axes du monde (ancien comportement) "
                              "au lieu de le tourner dans le repère du drone.")
+    parser.add_argument("--time-penalty", type=float, default=0.0,
+                        help="Pénalité par step (non terminal). Évite l'optimum \"rester en vie sans explorer\".")
+    parser.add_argument("--obs-keys", nargs="+", default=["proximity_rays", "frontier_vector", "velocity"],
+                        help="Entrées données à la politique. Défaut = le MINIMUM (plan de reprise) : rayons de "
+                             "proximité, frontières, vitesse du drone. À rajouter une par une : last_action, "
+                             "local_crop, relief_rays, coverage, kinematics.")
+    parser.add_argument("--k-frontiers", type=int, default=2, help="Nombre de frontières les plus proches observées.")
+    parser.add_argument("--free-altitude", action="store_true",
+                        help="4 sorties avec vz libre. Par défaut : altitude bloquée, 3 sorties (vx, vy, lacet).")
+    parser.add_argument("--n-rooms-min", type=int, default=3)
+    parser.add_argument("--n-rooms-max", type=int, default=3,
+                        help="Nombre de pièces tiré entre min et max (défaut 3-3 : on commence direct à 3 pièces).")
+    parser.add_argument("--progress-mode", choices=["euclid", "path"], default="euclid",
+                        help="euclid = progression à vol d'oiseau vers la frontière visée ; path = progression "
+                             "le long du chemin connu (BFS autour des murs).")
+    parser.add_argument("--no-yaw", action="store_true",
+                        help="2 sorties (vx, vy), pas de lacet (suppose l'altitude bloquée).")
+    parser.add_argument("--coeff-progress", type=float, default=0.0,
+                        help="Récompense par mètre gagné vers la frontière visée (signal de but dense).")
+    parser.add_argument("--no-last-action", action="store_true",
+                        help="Met l'observation last_action à zéro (ablation).")
     parser.add_argument("--gamma", type=float, default=0.99, help="Facteur d'actualisation PPO.")
     parser.add_argument("--max-climb-rate", type=float, default=2.0)
     parser.add_argument("--max-yaw-rate", type=float, default=2.0)
@@ -300,7 +322,11 @@ def main():
         raise RuntimeError("CUDA demandé mais indisponible (vérifier torch.cuda.is_available()).")
     device = args.device
     if device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        # Mesuré : 814 fps en CUDA (10 envs) contre 807 fps en CPU (8 envs) : le goulot est la physique
+        # des environnements, pas le réseau (petit). CUDA coûte en plus ~2,6 Go de RAM système.
+        device = "cpu"
+        print("Device auto -> cpu (le GPU n'accélère pas ce petit réseau et coûte ~2,6 Go de RAM ; "
+              "--device cuda pour le forcer).")
     print(f"Device sélectionné : {device}"
           + (f" ({torch.cuda.get_device_name(0)})" if device == "cuda" else ""))
 
@@ -310,7 +336,7 @@ def main():
         print("⚠️ psutil absent (pip install psutil) : surveillance de la RAM désactivée.")
     if ram_guard_on:
         n_envs, est_gb, budget_gb = ram_guard.choose_n_envs(
-            args.n_envs, args.n_steps, ExplorerEnv().observation_space, device == "cuda", args.ram_reserve_gb)
+            args.n_envs, args.n_steps, ExplorerEnv(obs_keys=args.obs_keys, k_frontiers=args.k_frontiers).observation_space, device == "cuda", args.ram_reserve_gb)
         print(f"RAM : {ram_guard.available_gb():.1f} Go libres sur {ram_guard.total_gb():.1f} Go, "
               f"réserve {args.ram_reserve_gb:.1f} Go -> budget {max(budget_gb, 0):.1f} Go ; "
               f"estimation pour {n_envs} env(s) : {est_gb:.1f} Go.")
@@ -422,6 +448,10 @@ def main():
             kp_alt=args.kp_alt, ki_alt=args.ki_alt,
             action_smoothing_alpha=args.action_smoothing_alpha, coeff_potential=args.coeff_potential,
             substeps=args.substeps, ego_crop=not args.no_ego_crop,
+            use_last_action=not args.no_last_action, time_penalty=args.time_penalty,
+            obs_keys=args.obs_keys, fixed_altitude=not args.free_altitude, k_frontiers=args.k_frontiers,
+            no_yaw=args.no_yaw, coeff_progress=args.coeff_progress, progress_mode=args.progress_mode,
+            n_rooms=(args.n_rooms_min, args.n_rooms_max),
 
         )
 
@@ -471,6 +501,10 @@ def main():
             kp_alt=args.kp_alt, ki_alt=args.ki_alt,
             action_smoothing_alpha=args.action_smoothing_alpha, coeff_potential=args.coeff_potential,
             substeps=args.substeps, ego_crop=not args.no_ego_crop,
+            use_last_action=not args.no_last_action, time_penalty=args.time_penalty,
+            obs_keys=args.obs_keys, fixed_altitude=not args.free_altitude, k_frontiers=args.k_frontiers,
+            no_yaw=args.no_yaw, coeff_progress=args.coeff_progress, progress_mode=args.progress_mode,
+            n_rooms=(args.n_rooms_min, args.n_rooms_max),
 
         )
 
@@ -482,7 +516,7 @@ def main():
 
         print(f"Nouvelle version {args.name}/{version}, entraînement depuis zéro")
 
-        env = VecNormalize(env, norm_obs=True, norm_obs_keys=NORM_OBS_KEYS,
+        env = VecNormalize(env, norm_obs=True, norm_obs_keys=[k for k in NORM_OBS_KEYS if k in args.obs_keys],
 
                             norm_reward=True, clip_obs=10.0, clip_reward=10.0)
 
