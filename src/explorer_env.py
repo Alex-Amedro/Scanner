@@ -140,7 +140,9 @@ class ExplorerEnv(gym.Env):
 
                  kp_rate=0.15, ki_rate=0.20, kd_rate=0.003, kp_alt=0.15, ki_alt=0.05,
 
-                 task="explore",
+                 task="explore", action_smoothing_alpha=0.3, coeff_potential=30.0,
+
+                 substeps=10, ego_crop=True,
 
                  max_steps=2000, seed=None):
 
@@ -212,6 +214,14 @@ class ExplorerEnv(gym.Env):
 
         self.ki_alt = ki_alt
 
+        self.action_smoothing_alpha = action_smoothing_alpha
+
+        self.coeff_potential = coeff_potential
+
+        self.substeps = substeps
+
+        self.ego_crop = ego_crop
+
         self.task = task
 
         self.max_steps = max_steps
@@ -237,6 +247,8 @@ class ExplorerEnv(gym.Env):
             "kinematics": spaces.Box(low=-50.0, high=50.0, shape=(10,), dtype=np.float32),
 
             "proximity_rays": spaces.Box(low=0.0, high=1.0, shape=(n_proximity_bins,), dtype=np.float32),
+
+            "last_action": spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32),
 
         })
 
@@ -277,6 +289,8 @@ class ExplorerEnv(gym.Env):
         self._hover_thrust_ctrl = 0.8 * 9.81 / 20.0
 
         self._dt_sub = None
+
+        self._last_action = np.zeros(4, dtype=np.float32)
 
 
 
@@ -374,6 +388,8 @@ class ExplorerEnv(gym.Env):
 
         self._prev_p = self._prev_q = 0.0
 
+        self._last_action = np.zeros(4, dtype=np.float32)
+
 
 
         self.grid = OccupancyGrid(self.layout.world_x_range, self.layout.world_y_range,
@@ -404,22 +420,22 @@ class ExplorerEnv(gym.Env):
 
 
 
-    def _control_cascade(self, target):
+    def _outer_velocity_loop(self, target):
+        """Boucle externe (UNE fois par action RL, ~50Hz) : consigne de vitesse en repère du corps
+        -> roll/pitch cibles, poussée de base (avant compensation d'inclinaison), vitesse de lacet.
+        Renvoie des consignes figées, consommées telles quelles par _inner_attitude_rate_loop à
+        chaque sous-step physique."""
         vx_body_des, vy_body_des, vz_des, yaw_rate_des = target
-        quat = self.data.body("drone_body").xquat
-        roll, pitch, _ = _quat_roll_pitch_upz(quat)
-        yaw = _quat_to_yaw(quat)
+        yaw = _quat_to_yaw(self.data.body("drone_body").xquat)
         vel_lin = self.data.qvel[0:3]
-        vel_ang = self.data.qvel[3:6]
+        dt = self._dt_sub * self.substeps
 
         world_vx_des = vx_body_des * np.cos(yaw) - vy_body_des * np.sin(yaw)
         world_vy_des = vx_body_des * np.sin(yaw) + vy_body_des * np.cos(yaw)
         err_vx = world_vx_des - vel_lin[0]
         err_vy = world_vy_des - vel_lin[1]
-        self._int_vx = np.clip(self._int_vx + err_vx * self._dt_sub,
-                               -self._int_vel_max, self._int_vel_max)
-        self._int_vy = np.clip(self._int_vy + err_vy * self._dt_sub,
-                               -self._int_vel_max, self._int_vel_max)
+        self._int_vx = np.clip(self._int_vx + err_vx * dt, -self._int_vel_max, self._int_vel_max)
+        self._int_vy = np.clip(self._int_vy + err_vy * dt, -self._int_vel_max, self._int_vel_max)
 
         a_des_world_x = self.kp_vel * err_vx + self.ki_vel * self._int_vx
         a_des_world_y = self.kp_vel * err_vy + self.ki_vel * self._int_vy
@@ -429,23 +445,30 @@ class ExplorerEnv(gym.Env):
         pitch_des = np.clip(a_body_x / 9.81, -max_tilt, max_tilt)
         roll_des = np.clip(-a_body_y / 9.81, -max_tilt, max_tilt)
 
+        err_vz = vz_des - vel_lin[2]
+        self._int_vz = np.clip(self._int_vz + err_vz * dt, -self._int_alt_max, self._int_alt_max)
+        thrust_base = self._hover_thrust_ctrl + self.kp_alt * err_vz + self.ki_alt * self._int_vz
+        return roll_des, pitch_des, thrust_base, yaw_rate_des
+
+    def _inner_attitude_rate_loop(self, setpoint):
+        """Boucle interne (chaque sous-step, ~500Hz) : attitude cible -> taux -> couples moteur,
+        poussée divisée par up_z (la poussée agit le long de l'axe Z du CORPS : sa composante
+        verticale vaut thrust * up_z)."""
+        roll_des, pitch_des, thrust_base, yaw_rate_des = setpoint
+        roll, pitch, up_z = _quat_roll_pitch_upz(self.data.body("drone_body").xquat)
+        vel_ang = self.data.qvel[3:6]
+
         err_p = self.kp_att * (roll_des - roll) - vel_ang[0]
         err_q = self.kp_att * (pitch_des - pitch) - vel_ang[1]
         err_r = yaw_rate_des - vel_ang[2]
-        self._int_p = np.clip(self._int_p + err_p * self._dt_sub,
-                              -self._int_rate_max, self._int_rate_max)
-        self._int_q = np.clip(self._int_q + err_q * self._dt_sub,
-                              -self._int_rate_max, self._int_rate_max)
-        self._int_r = np.clip(self._int_r + err_r * self._dt_sub,
-                              -self._int_rate_max, self._int_rate_max)
+        self._int_p = np.clip(self._int_p + err_p * self._dt_sub, -self._int_rate_max, self._int_rate_max)
+        self._int_q = np.clip(self._int_q + err_q * self._dt_sub, -self._int_rate_max, self._int_rate_max)
+        self._int_r = np.clip(self._int_r + err_r * self._dt_sub, -self._int_rate_max, self._int_rate_max)
         d_p = -(vel_ang[0] - self._prev_p) / self._dt_sub
         d_q = -(vel_ang[1] - self._prev_q) / self._dt_sub
         self._prev_p, self._prev_q = float(vel_ang[0]), float(vel_ang[1])
 
-        err_vz = vz_des - vel_lin[2]
-        self._int_vz = np.clip(self._int_vz + err_vz * self._dt_sub,
-                               -self._int_alt_max, self._int_alt_max)
-        thrust_ctrl = self._hover_thrust_ctrl + self.kp_alt * err_vz + self.ki_alt * self._int_vz
+        thrust_ctrl = thrust_base / max(up_z, 0.5)
         return np.array([
             np.clip(thrust_ctrl, -1.0, 1.0),
             np.clip(self.kp_rate * err_p + self.ki_rate * self._int_p + self.kd_rate * d_p, -1.0, 1.0),
@@ -453,51 +476,33 @@ class ExplorerEnv(gym.Env):
             np.clip(self.kp_rate * err_r + self.ki_rate * self._int_r, -1.0, 1.0),
         ], dtype=np.float32)
 
-
     def step(self, action):
 
-        action = np.array(action, dtype=np.float32)
+        raw = np.clip(np.array(action, dtype=np.float32), -1.0, 1.0)
 
+        # Lissage exponentiel de l'action brute PPO (alpha=1 -> pas de lissage) : la consigne de
+        # vitesse ne saute plus d'un step à l'autre sous l'effet du bruit d'exploration gaussien.
+        alpha = self.action_smoothing_alpha
+        self._last_action = (alpha * raw + (1.0 - alpha) * self._last_action).astype(np.float32)
+        cmd = self._last_action
+
+        # Plafond sur la CONSIGNE (norme du vecteur horizontal <= max_speed, pour que la diagonale
+        # ne dépasse pas), pas sur la physique : un clamp sur qvel est invisible du PID (son
+        # intégrale continuerait de pousser contre le clamp).
+        v_xy = cmd[:2] * self.max_speed / max(1.0, float(np.linalg.norm(cmd[:2])))
         target = (
-            float(action[0]) * self.max_speed,
-            float(action[1]) * self.max_speed,
-            float(action[2]) * self.max_climb_rate,
-            float(action[3]) * self.max_yaw_rate,
+            float(v_xy[0]),
+            float(v_xy[1]),
+            float(cmd[2]) * self.max_climb_rate,
+            float(cmd[3]) * self.max_yaw_rate,
         )
 
-
-
-        for _ in range(10):
-
-            self.data.ctrl[:] = self._control_cascade(target)
-
+        setpoint = self._outer_velocity_loop(target)
+        for _ in range(self.substeps):
+            self.data.ctrl[:] = self._inner_attitude_rate_loop(setpoint)
             mujoco.mj_step(self.model, self.data)
-
-            if self.max_speed > 0.0:
-
-                # Plafond DUR (pas une incitation de reward négociable) sur la vitesse
-
-                # horizontale, appliqué à chaque sous-step physique — pas seulement une fois par
-
-                # step — pour qu'aucun pic transitoire n'échappe au plafond. coeff_speed (v15) a
-
-                # montré qu'un coût, même supérieur aux rewards positifs typiques, n'empêche pas
-
-                # la politique d'accélérer quand même ; ceci est une contrainte physique qu'elle
-
-                # ne peut pas "acheter".
-
-                vh = np.hypot(self.data.qvel[0], self.data.qvel[1])
-
-                if vh > self.max_speed:
-
-                    scale = self.max_speed / vh
-
-                    self.data.qvel[0] *= scale
-
-                    self.data.qvel[1] *= scale
-
-
+            if self.data.ncon > 0:  # contact en cours de route : ne pas laisser un rebond l'effacer
+                break
 
         self._scan_and_update_grid()
 
@@ -593,7 +598,8 @@ class ExplorerEnv(gym.Env):
 
         else:
 
-            reward = n_new_cells + (phi - self._last_phi) + bonus_alignement - penalite_proximite
+            reward = (n_new_cells + self.coeff_potential * (phi - self._last_phi)
+                      + bonus_alignement - penalite_proximite)
 
             if self.coeff_spin > 0.0:
 
@@ -678,6 +684,15 @@ class ExplorerEnv(gym.Env):
     # ------------------------------------------------------------------ #
 
 
+
+    def close(self):
+        """Ferme le viewer s'il existe et lâche les gros objets (modèle MuJoCo, grille) pour que
+        la mémoire soit récupérée sans attendre la fin du processus."""
+        if self.viewer is not None:
+            self.viewer.close()
+            self.viewer = None
+        self._viewer_model = None
+        self.model = self.data = self.grid = None
 
     def _in_corridor(self, x, y):
 
@@ -825,7 +840,11 @@ class ExplorerEnv(gym.Env):
 
 
 
-        local_crop = self.grid.local_crop_onehot(pos[0], pos[1], self.crop_size)
+        yaw = _quat_to_yaw(quat)
+        if self.ego_crop:
+            local_crop = self.grid.local_crop_onehot_ego(pos[0], pos[1], yaw, self.crop_size)
+        else:
+            local_crop = self.grid.local_crop_onehot(pos[0], pos[1], self.crop_size)
 
         coverage = np.array([self.grid.coverage_ratio()], dtype=np.float32)
 
@@ -841,9 +860,17 @@ class ExplorerEnv(gym.Env):
 
 
 
+        # Vitesse linéaire tournée en repère du CORPS (rotation -yaw), comme l'action et les
+        # observations égocentriques (frontier_vector, rayons). vel_ang est déjà en repère corps
+        # (convention du joint libre MuJoCo).
+        c, s_ = np.cos(yaw), np.sin(yaw)
+        vel_body = np.array([c * vel_lin[0] + s_ * vel_lin[1],
+                             -s_ * vel_lin[0] + c * vel_lin[1],
+                             vel_lin[2]])
+
         kinematics = np.concatenate([
 
-            vel_lin, vel_ang, [pos[2] / 3.0, roll, pitch, up_z],
+            vel_body, vel_ang, [pos[2] / 3.0, roll, pitch, up_z],
 
         ]).astype(np.float32)
 
@@ -882,6 +909,8 @@ class ExplorerEnv(gym.Env):
             "kinematics": kinematics,
 
             "proximity_rays": proximity_rays,
+
+            "last_action": self._last_action.copy(),
 
         }
 

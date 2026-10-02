@@ -27,7 +27,7 @@ class ExplorerFeaturesExtractor(BaseFeaturesExtractor):
             cnn_flat_dim = self.cnn(dummy).shape[1]
         self.cnn_head = nn.Sequential(nn.Linear(cnn_flat_dim, cnn_out_dim), nn.ReLU())
 
-        self.scalar_keys = ["frontier_vector", "relief_rays", "kinematics", "coverage", "proximity_rays"]
+        self.scalar_keys = ["frontier_vector", "relief_rays", "kinematics", "coverage", "proximity_rays", "last_action"]
         scalar_dim = sum(observation_space[k].shape[0] for k in self.scalar_keys)
         self.mlp = nn.Sequential(
             nn.Linear(scalar_dim, 64), nn.ReLU(),

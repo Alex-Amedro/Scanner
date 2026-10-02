@@ -698,7 +698,7 @@ fort, au prix de bascules plus extrêmes. Amélioration nette globalement, mais 
 (bascules non maîtrisées, manque d'anticipation) reste entier.
 
 ## v19 — architecture hiérarchique : contrôle en vitesse + cascade PID (remplace le contrôle en
-couple direct) — RÉSULTAT MITIGÉ, ouvre le chantier v20
+couple direct) — RÉSULTAT MITIGÉ, ouvre le chantier v2.0 (ex-v20)
 
 **Motivation** : sur v16/v18, roll/pitch restent tenus à -40/-60° en continu, y compris sur des
 épisodes victorieux — aucune incitation dans le reward à revenir à plat une fois stabilisé, et le
@@ -763,31 +763,99 @@ en couple), jamais réétudiés pour le nouveau (contrôle en vitesse)**. Incoh�
 `ret_rms.std` + impact de la normalisation sur `death_penalty`/`r_exp`/un step typique, sans
 réentraîner).
 
-## v20 — refonte groupée reward + observations pour le contrôle en vitesse (À LANCER)
+## Génération 2 — nouvelle numérotation : v2.0, v2.1, v2.2…
+
+**Tout ce qui précède (v1 à v19) est désormais la « génération 1 »** (contrôle en couple direct, puis
+première version de la cascade PID). La refonte ci-dessous change l'action, les observations, le
+reward et le nombre d'environnements parallèles : elle n'est plus comparable en conditions
+identiques aux versions précédentes. Elle s'appelle **v2.0** (anciennement « v20 »), les suivantes
+seront v2.1, v2.2… Les comparaisons à v12/v16 restent indicatives seulement.
+
+**Changements de protocole** :
+- `--n-envs` passe de 8 à **16** (défaut de `train.py`) : rollout de 16 384 steps au lieu de 8 192,
+  donc deux fois moins de mises à jour PPO à budget égal (500k ≈ 30 mises à jour). À surveiller ;
+  `--n-steps 512` rétablirait la taille de rollout d'avant.
+- **Garde-fou RAM** (`ram_guard.py`, `--ram-reserve-gb`, `--max-ram-gb`, `--no-ram-guard`) : `--n-envs`
+  est réduit automatiquement si la RAM libre ne suffit pas (la machine de dev a 15,4 Go dont souvent
+  moins de 4 Go libres) ; refus propre avec message si même 1 env ne tient pas ; pendant
+  l'entraînement, arrêt propre + sauvegarde si la RAM libre passe sous la moitié de la réserve. Ctrl+C
+  et erreurs mémoire (MemoryError, OOM CUDA, worker tué) sauvegardent aussi (`--resume` possible,
+  `stopped_early` dans `metadata.json`), ferment les workers et libèrent la mémoire ; codes de
+  sortie : 0 ok, 2 erreur mémoire/refus, 3 arrêt RAM, 130 Ctrl+C. Vérifié par scénarios simulés
+  (0 processus orphelin) et par une courbe `ram/*` dans tensorboard : 2,65 -> 2,71 Go sur 40k steps,
+  pas de fuite. Coût mesuré : ~70 Mo par worker ; le gros poste est le processus principal (torch)
+  et le rollout buffer (le crop 3x64x64 pèse 48 Ko par step).
+- `train.py` : les emojis/« ≈ » des messages faisaient planter le programme en console Windows
+  cp1252 (y compris `--help`) : sortie reconfigurée en `errors="replace"`.
+- Bug corrigé : `RotatingCheckpointCallback` comptait `base_timesteps` deux fois après `--resume`.
+- Budget d'entraînement : **500k steps**, pas 1M. Les anciennes versions plafonnaient dès ~400k.
+
+## v2.0 (ex-v20) — refonte groupée reward + observations pour le contrôle en vitesse (CODE PRÊT, À LANCER)
 
 **Changements groupés (assumé — pas à variable unique, cohérent avec la décision prise après
 l'incident v11 : parfois plusieurs changements liés à une même cause doivent être testés ensemble)** :
 - `kinematics` : `vel_lin` tourné en repère du corps avant observation.
-- Clamp dur `qvel`/`max_speed` par sous-step **retiré** (redondant avec l'espace d'action).
+- Clamp dur `qvel`/`max_speed` par sous-step **retiré**. À la place, la *consigne* horizontale est
+  plafonnée en norme (`|v_cmd| <= max_speed`, pour que la diagonale ne dépasse pas 6 m/s : sans ça
+  la boîte d'action `[-1,1]²` autorisait 8,5 m/s). Le PID voit tout, rien n'est volé en douce.
 - `coeff_spin` désactivé (0.0, défaut) pour ce test.
 - `coeff_proximity` réactivé (0.3, seuil 0.6, restreint aux pièces).
-- Nouvelle observation `last_action` (dernière consigne de vitesse lissée, 4 valeurs) — ajoutée à
-  `observation_space`, `_get_obs()`, et `scalar_keys` dans `ExplorerFeaturesExtractor`.
-- Lissage de l'action (`action_smoothing_alpha=0.3`, moyenne mobile exponentielle sur l'action brute
-  PPO avant conversion en consigne de vitesse).
-- Cascade PID scindée en `_outer_velocity_loop` (une fois par action RL, ~50Hz) et
-  `_inner_attitude_rate_loop` (chaque sous-step, ~500Hz) — conforme à l'architecture standard,
-  réduit aussi le coût de calcul.
-- Poussée compensée par l'inclinaison (`thrust_ctrl` divisé par `up_z`, clampé à 0,5 min).
+- Nouvelle observation `last_action` (dernière consigne lissée, 4 valeurs dans [-1,1]) — dans
+  `observation_space`, `_get_obs()`, et `scalar_keys` de `ExplorerFeaturesExtractor`.
+- Lissage de l'action (`action_smoothing_alpha=0.3`, EMA sur l'action brute PPO).
+- Cascade scindée en `_outer_velocity_loop` (1x par action RL : consigne vitesse -> roll/pitch
+  cibles + poussée de base + intégrateurs, `dt` = 10 sous-steps) et `_inner_attitude_rate_loop`
+  (chaque sous-step : attitude -> taux -> couples).
+- Poussée compensée par l'inclinaison (`thrust_base / max(up_z, 0.5)`, dans la boucle interne
+  donc avec l'`up_z` instantané).
+
+**Ajouts après audit du code (pas dans le plan initial)** :
+- **Crop de grille égocentrique** (`ego_crop=True`, `--no-ego-crop` pour l'ancien comportement) :
+  le crop était aligné sur le monde alors que l'action, `frontier_vector`, les rayons et maintenant
+  la vitesse sont tous en repère du corps, et que le yaw absolu n'est pas observé : le CNN ne
+  pouvait pas savoir où était "devant" sur la carte. Même incohérence que le point 1, sur la
+  seule observation qui restait en repère monde. Haut de l'image = devant, gauche = gauche du drone.
+- **`coeff_potential=30`** (`--coeff-potential`) : mesuré avec une politique heuristique "va vers la
+  frontière" sur 6 bâtiments, le terme `phi - last_phi` vaut en moyenne |0,0025| par step contre
+  8,1 pour `n_new_cells` (~3000x plus petit) — il ne guidait donc rien (cf. revue externe plus bas).
+  À 30 : moyenne |0,076|, pics de -4,6 (la frontière la plus proche disparaît) à +2,4.
+- **`RotatingCheckpointCallback` : `extra_meta` toujours pas passé** malgré ce que dit la section
+  v17 (le fix n'était pas dans le code) — corrigé pour de bon : un run coupé sur checkpoint
+  périodique garde `env_kwargs`, sinon `evaluate.py` retombe sur les défauts, ce qui est
+  désormais bien plus grave (`action_smoothing_alpha`, `ego_crop`, `coeff_potential` changeraient).
+- **`evaluate.py` : `--max-steps` marquait "victoire" un épisode simplement coupé** par la limite
+  (l'env n'avait pas terminé). Corrigé : compté "timeout". Important pour `--max-steps 400`.
+- Le contact est testé à chaque sous-step (sortie anticipée), plus seulement après les 10 : un
+  rebond sur un mur ne peut plus effacer la collision.
+- Nouveaux flags d'ablation, défauts inchangés : `--substeps` (10 = 50Hz), `--gamma` (0.99),
+  `--action-smoothing-alpha`, `--no-ego-crop`.
+
+**Vérifications faites** (`src/test_cascade.py`, contacts désactivés pour voler à travers les murs) :
+hover 6 s sans dérive ni inclinaison ; avance à 3 m/s atteinte (3,10) avec inclinaison max 21,8° et
+altitude constante (compensation d'`up_z` OK) ; freinage jusqu'à l'arrêt ; après un virage de 93°
+la vitesse monde suit le cap et l'observation reste (vx>0, vy≈0) en repère corps ; latéral, montée,
+lacet atteignent leur consigne ; diagonale pleine plafonnée à ~6 m/s ; crop égocentrique testé à 4
+yaws (mur devant -> haut de l'image, mur à gauche -> colonnes de gauche). Mini-entraînement
+(16k steps) -> checkpoint -> `evaluate.py` : OK de bout en bout.
+
+**Points d'attention identifiés mais NON modifiés (à tester ensuite, un à la fois)** :
+- Temps de réponse de la boucle de vitesse : 0,68 s (63%) avec `kp_vel=1.5`, soit ~34 steps RL. Les
+  pièces font 4-7 m et on freine de 6 m/s en ~2,6 m minimum : un drone qui ne ralentit pas
+  d'avance finit au mur. Leviers : `--kp-vel 3`, ou `--max-speed 3`.
+- `gamma=0.99` à 50Hz = horizon effectif de 2 s (~6 m de vol) ; un trajet pièce->pièce dure plus.
+  Leviers : `--gamma 0.995` ou `--substeps 25` (décision à 20Hz, 2,5x moins de steps pour la même
+  durée simulée, donc aussi un entraînement plus rapide).
+- Pas de pénalité de durée : rien ne distingue "errer" de "explorer" tant qu'aucune cellule n'est
+  découverte, hormis le potentiel.
 
 **Commande** :
 ```
-python train.py --name explorer --damping 0.05 --death-penalty 500 --max-speed 6.0 --coeff-proximity 0.3 --proximity-threshold 0.6 --seed 42 --total-timesteps 1000000
+python train.py --name explorer --damping 0.05 --death-penalty 500 --max-speed 6.0 --coeff-proximity 0.3 --proximity-threshold 0.6 --seed 42 --total-timesteps 500000
 ```
-(pas de `--coeff-spin` : retombe à 0.0 par défaut, voulu — point 3 ci-dessus)
+(`--n-envs` vaut 16 par défaut ; pas de `--coeff-spin` : retombe à 0.0 par défaut, voulu — point 3 ci-dessus)
 
-**À comparer après coup** : contre v12 (47%/50%/3%/82,9%, 1M steps, ancien contrôle en couple) et
-v16 (60%/37%/3%/80,7%, 500k steps) — pour trancher si le contrôle en vitesse égale ou dépasse
+**À comparer après coup** : contre v16 (60%/37%/3%/80,7%, 500k steps, même budget) et v12
+(47%/50%/3%/82,9%, 1M steps), tous deux génération 1 (ancien contrôle en couple) — pour trancher si le contrôle en vitesse égale ou dépasse
 l'ancien contrôle en couple à budget comparable, et si le comportement "errant" de v19 a disparu
 (`--debug-angles` sur quelques épisodes, `--max-steps 400` pour éviter des traces trop longues).
  

@@ -13,6 +13,8 @@ from datetime import datetime
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
 
+import ram_guard
+
 MODELS_ROOT = "models"
 
 
@@ -114,11 +116,47 @@ class RotatingCheckpointCallback(BaseCallback):
 
     def _on_step(self):
         if self.n_calls % max(self.save_freq_steps // self.training_env.num_envs, 1) == 0:
-            total = self._base_timesteps + self.num_timesteps
-            save_checkpoint(self.name, self.version, self.model, self.vec_normalize_env, total)
+            total = self.num_timesteps  # cumulatif, y compris après --resume (déjà restauré par PPO.load)
+            save_checkpoint(self.name, self.version, self.model, self.vec_normalize_env, total,
+                            extra_meta=dict(self.extra_meta, base_timesteps=self._base_timesteps))
             if self.verbose:
                 print(f"[checkpoint] {self.name}/{self.version} sauvegardé à {total} steps")
         return True
+
+
+class RamGuardCallback(BaseCallback):
+    """Arrête l'entraînement PROPREMENT (return False -> learn() rend la main, train.py sauvegarde
+    puis libère tout) quand la RAM libre du système passe sous min_free_gb, ou quand l'ensemble
+    processus principal + workers dépasse max_tree_gb. Logue aussi la RAM dans tensorboard
+    (ram/*) : une courbe qui monte sans s'arrêter d'un rollout à l'autre = fuite."""
+
+    def __init__(self, min_free_gb, max_tree_gb=None, check_every=25, verbose=1):
+        super().__init__(verbose)
+        self.min_free_gb = min_free_gb
+        self.max_tree_gb = max_tree_gb
+        self.check_every = check_every
+        self.stop_reason = None
+
+    def _on_step(self):
+        if self.n_calls % self.check_every:
+            return True
+        free = ram_guard.available_gb()
+        if free < self.min_free_gb:
+            self.stop_reason = (f"RAM libre tombée à {free:.2f} Go (seuil {self.min_free_gb:.2f} Go) "
+                                f"vers {self.num_timesteps} steps")
+        elif self.max_tree_gb is not None and ram_guard.tree_rss_gb() > self.max_tree_gb:
+            self.stop_reason = (f"RAM de l'entraînement > {self.max_tree_gb:.2f} Go "
+                                f"vers {self.num_timesteps} steps")
+        if self.stop_reason:
+            if self.verbose:
+                print(f"\n[ram] {self.stop_reason} -> arrêt propre, sauvegarde en cours.")
+            return False
+        return True
+
+    def _on_rollout_end(self):
+        self.logger.record("ram/system_available_gb", ram_guard.available_gb())
+        self.logger.record("ram/training_tree_gb", ram_guard.tree_rss_gb())
+        self.logger.record("ram/main_process_gb", ram_guard.psutil.Process().memory_info().rss / ram_guard.GB)
 
 
 class EpisodeMetricsCallback(BaseCallback):

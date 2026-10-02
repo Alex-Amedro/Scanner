@@ -10,7 +10,7 @@ The drone starts in the first room of a randomly generated building (2 to 4 room
 
 - **Environment**: a new building is generated at every episode (room sizes, corridor positions and door offsets are random), then built as a MuJoCo model. Corridors are offset from each other so the drone cannot just look straight through every door.
 - **Perception**: a 180-ray horizontal LiDAR, plus a few vertical rays for the relief. Every scan updates a 2D occupancy grid (free / occupied / unknown) at 15 cm resolution.
-- **Observation**: a local crop of the occupancy grid (CNN), the direction and distance to the nearest frontiers (boundary between known and unknown space), a coarse summary of the LiDAR, the drone's own velocity and attitude (in the drone frame), and its last command.
+- **Observation**: a local crop of the occupancy grid rotated into the drone frame (CNN), the direction and distance to the nearest frontiers (boundary between known and unknown space), a coarse summary of the LiDAR, the drone's own velocity and attitude (in the drone frame), and its last command.
 - **Action**: the policy outputs a desired velocity (forward, sideways, vertical) and yaw rate. A cascaded PID controller turns that into a target attitude, then into motor torques, so the policy never has to balance the drone itself.
 - **Reward**: newly discovered cells, a potential term that pulls toward frontiers, a large bonus when coverage reaches the target, and a penalty for crashing or flipping.
 - **Training**: PPO (Stable-Baselines3) on several environments in parallel (CPU physics, optional GPU for the network).
@@ -33,7 +33,7 @@ Most failures were crashes inside rooms (not corridors) caused by braking or tur
 
 ## Current work
 
-Version 19 replaced direct torque control with the velocity-command + PID cascade described above. Roll and pitch now stay under 30 degrees, but the policy flew slowly and indecisively. The reward and observations were designed for the old controller, so v20 reworks them together: body-frame velocity, action smoothing, last command in the observation, and a proximity penalty. Evaluation of v20 is still to come.
+Version 19 replaced direct torque control with the velocity-command + PID cascade described above. Roll and pitch now stay under 30 degrees, but the policy flew slowly and indecisively. The reward and observations were designed for the old controller, so v2.0 (the second generation; v1.x is everything before) reworks them together: body-frame velocity, action smoothing, last command in the observation, and a proximity penalty. Evaluation of v2.0 is still to come.
 
 ## Project layout
 
@@ -54,11 +54,11 @@ Version 19 replaced direct torque control with the velocity-command + PID cascad
 ```
 pip install -r requirements_runner.txt
 
-python src/train.py --name explorer --damping 0.05 --death-penalty 500 --seed 42 --n-envs 8 --device auto --total-timesteps 500000
+python src/train.py --name explorer --damping 0.05 --death-penalty 500 --seed 42 --n-envs 16 --device auto --total-timesteps 500000
 python src/evaluate.py --name explorer --n-episodes 30 --visual
 ```
 
-Run each script with `--help` for the full list of options. `--n-envs` should not exceed your number of logical CPU cores.
+Run each script with `--help` for the full list of options. `--n-envs` should not exceed your number of logical CPU cores. Training also watches RAM: `--n-envs` is lowered automatically if free memory is short (`--ram-reserve-gb`), and on Ctrl+C, a memory error or low RAM it saves a checkpoint, closes the workers and exits cleanly (resume with `--resume`). Needs `psutil`.
 
 ## Stack
 

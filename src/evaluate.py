@@ -19,17 +19,12 @@ from datetime import datetime
 
 import numpy as np
 
-from building_generator import compute_navigable_rects
-
 
 def _in_corridor(env, x, y):
     """True si (x, y) tombe dans un rectangle de couloir (pas de pièce) du
     layout couramment chargé dans env. Les couloirs sont ajoutés après les
     pièces par compute_navigable_rects, d'où le découpage par n_rooms."""
-    rects = compute_navigable_rects(env.layout)
-    n_rooms = len(env.layout.rooms)
-    return any(x_min <= x <= x_max and y_min <= y <= y_max
-               for x_min, x_max, y_min, y_max in rects[n_rooms:])
+    return env._in_corridor(x, y)
 
 
 def run_episode(model, vec_env, seed, max_steps=2000, visual=False, slow=False, debug_angles=False):
@@ -45,6 +40,7 @@ def run_episode(model, vec_env, seed, max_steps=2000, visual=False, slow=False, 
     truncated = False
     final_coverage = 0.0
     step_count = 0
+    ended = False  # False si la boucle sort sur --max-steps sans que l'env ait terminé l'épisode
     collision_location = None  # "couloir" ou "pièce", fixé à la 1ère collision de l'épisode
     minlid_by_loc = {"couloir": [], "pièce": []} if debug_angles else None
 
@@ -92,13 +88,14 @@ def run_episode(model, vec_env, seed, max_steps=2000, visual=False, slow=False, 
             time.sleep(0.15 if slow else 0.03)
 
         if dones[0]:
+            ended = True
             break
 
     if retourne:
         outcome = "retourné"
     elif collision:
         outcome = "mort"
-    elif truncated:
+    elif truncated or not ended:
         outcome = "timeout"
     else:
         outcome = "victoire"
@@ -244,6 +241,7 @@ def main():
             writer.writeheader()
         writer.writerow(row)
     print(f"\nLigne ajoutée à {journal_path} — historique de toutes tes évaluations, à comparer entre runs.")
+    vec_env.close()
 
 
 if __name__ == "__main__":

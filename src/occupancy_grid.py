@@ -98,6 +98,30 @@ class OccupancyGrid:
         onehot[2] = (crop == UNKNOWN)
         return onehot
 
+    def local_crop_onehot_ego(self, x, y, yaw, crop_size=64):
+        """Crop 3 canaux centré sur (x, y) ET tourné dans le repère du corps : "haut" de l'image
+        = devant le drone (axe x du corps), "gauche" de l'image = gauche du drone (axe y du
+        corps). Cohérent avec frontier_vector/proximity_rays/relief_rays et avec l'action, qui
+        sont tous égocentriques — le CNN n'a plus à deviner le cap pour interpréter la carte.
+        Échantillonnage au plus proche voisin ; hors grille = UNKNOWN."""
+        half = crop_size // 2
+        idx = (half - np.arange(crop_size, dtype=np.float32)) * self.resolution
+        fwd = idx[:, None]    # ligne r  -> distance vers l'avant
+        left = idx[None, :]   # colonne c -> distance vers la gauche
+        cos_y, sin_y = np.cos(yaw), np.sin(yaw)
+        wx = x + fwd * cos_y - left * sin_y
+        wy = y + fwd * sin_y + left * cos_y
+        cx = np.floor((wx - self.x_min) / self.resolution).astype(np.int32)
+        cy = np.floor((wy - self.y_min) / self.resolution).astype(np.int32)
+        inside = (cx >= 0) & (cx < self.width) & (cy >= 0) & (cy < self.height)
+        crop = np.full((crop_size, crop_size), UNKNOWN, dtype=np.int8)
+        crop[inside] = self.grid[cy[inside], cx[inside]]
+        onehot = np.zeros((3, crop_size, crop_size), dtype=np.float32)
+        onehot[0] = (crop == FREE)
+        onehot[1] = (crop == OCCUPIED)
+        onehot[2] = (crop == UNKNOWN)
+        return onehot
+
     def frontier_cells(self):
         """Cellules libres ayant au moins un voisin inconnu ET atteignable
         (4-connexe) — un voisin inconnu hors zone atteignable ne compte pas,

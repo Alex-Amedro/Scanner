@@ -32,7 +32,11 @@ import argparse
 
 import os
 
+import sys
 
+
+
+import ram_guard
 
 from explorer_env import ExplorerEnv
 
@@ -82,6 +86,12 @@ def main():
 
     # (8 copies en mémoire) — c'est ce qui a fait planter l'allocation.
 
+    # Console Windows en cp1252 : un emoji ou un "≈" dans un message faisait planter le programme
+    # (UnicodeEncodeError), y compris dans le chemin d'erreur qui doit justement rester propre.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+
     from stable_baselines3 import PPO
 
     from stable_baselines3.common.vec_env import VecNormalize
@@ -103,7 +113,18 @@ def main():
 
                          help="Repart des poids de cette version, dans une nouvelle version dérivée (ex: v1 -> v1.1).")
 
-    parser.add_argument("--n-envs", type=int, default=8)
+    parser.add_argument("--n-envs", type=int, default=16,
+                        help="Environnements parallèles DEMANDÉS. Réduit automatiquement si la RAM libre "
+                             "ne suffit pas (cf. --ram-reserve-gb), sauf avec --no-ram-guard.")
+    parser.add_argument("--ram-reserve-gb", type=float, default=1.5,
+                        help="RAM libre minimale à laisser au système/aux autres programmes. Sert à "
+                             "dimensionner --n-envs au lancement ; l'arrêt d'urgence propre (sauvegarde "
+                             "puis sortie) se déclenche si la RAM libre passe sous la moitié de cette valeur.")
+    parser.add_argument("--max-ram-gb", type=float, default=None,
+                        help="Plafond optionnel de RAM pour l'entraînement (processus principal + workers). "
+                             "Dépassé = arrêt propre avec sauvegarde. Utile pour détecter une fuite.")
+    parser.add_argument("--no-ram-guard", action="store_true",
+                        help="Désactive l'adaptation de --n-envs et la surveillance de la RAM.")
     parser.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto",
                         help="Device PyTorch/SB3 : auto (CUDA si disponible), cuda ou cpu.")
 
@@ -235,6 +256,18 @@ def main():
 
                               "la politique paie le coût et accélère quand même).")
 
+    parser.add_argument("--action-smoothing-alpha", type=float, default=0.3,
+                        help="Lissage exponentiel de l'action brute PPO (1.0 = aucun lissage).")
+    parser.add_argument("--coeff-potential", type=float, default=30.0,
+                        help="Poids du terme de potentiel de frontière (phi - last_phi) dans le reward. "
+                             "À 1.0 il est ~200-1000x plus petit que n_new_cells et ne guide rien.")
+    parser.add_argument("--substeps", type=int, default=10,
+                        help="Sous-steps physiques (2 ms) par action RL. 10 = 50Hz. Plus grand = "
+                             "horizon de décision plus long pour un gamma donné.")
+    parser.add_argument("--no-ego-crop", action="store_true",
+                        help="Garde le crop de grille aligné sur les axes du monde (ancien comportement) "
+                             "au lieu de le tourner dans le repère du drone.")
+    parser.add_argument("--gamma", type=float, default=0.99, help="Facteur d'actualisation PPO.")
     parser.add_argument("--max-climb-rate", type=float, default=2.0)
     parser.add_argument("--max-yaw-rate", type=float, default=2.0)
     parser.add_argument("--max-tilt-angle-deg", type=float, default=35.0)
@@ -271,10 +304,30 @@ def main():
     print(f"Device sélectionné : {device}"
           + (f" ({torch.cuda.get_device_name(0)})" if device == "cuda" else ""))
 
+    n_envs = args.n_envs
+    ram_guard_on = not args.no_ram_guard and ram_guard.available()
+    if not args.no_ram_guard and not ram_guard.available():
+        print("⚠️ psutil absent (pip install psutil) : surveillance de la RAM désactivée.")
+    if ram_guard_on:
+        n_envs, est_gb, budget_gb = ram_guard.choose_n_envs(
+            args.n_envs, args.n_steps, ExplorerEnv().observation_space, device == "cuda", args.ram_reserve_gb)
+        print(f"RAM : {ram_guard.available_gb():.1f} Go libres sur {ram_guard.total_gb():.1f} Go, "
+              f"réserve {args.ram_reserve_gb:.1f} Go -> budget {max(budget_gb, 0):.1f} Go ; "
+              f"estimation pour {n_envs} env(s) : {est_gb:.1f} Go.")
+        if est_gb > budget_gb:
+            print(f"Erreur : même avec 1 environnement, l'entraînement demande ~{est_gb:.1f} Go alors "
+                  f"que le budget est de {max(budget_gb, 0):.1f} Go. Ferme d'autres programmes, baisse "
+                  f"--n-steps / --ram-reserve-gb, ou passe --no-ram-guard (à tes risques).")
+            return 2
+        if n_envs < args.n_envs:
+            print(f"⚠️ --n-envs réduit de {args.n_envs} à {n_envs} pour tenir en RAM "
+                  f"(un rollout est donc plus petit : ajuste --n-steps si tu veux garder la même "
+                  f"taille de rollout).")
+
     n_cpu = os.cpu_count() or 1
-    print(f"CPU logiques : {n_cpu}, environnements parallèles : {args.n_envs}")
-    if args.n_envs > n_cpu:
-        print(f"⚠️ --n-envs ({args.n_envs}) dépasse le nombre de CPU logiques ({n_cpu}) : "
+    print(f"CPU logiques : {n_cpu}, environnements parallèles : {n_envs}")
+    if n_envs > n_cpu:
+        print(f"⚠️ --n-envs ({n_envs}) dépasse le nombre de CPU logiques ({n_cpu}) : "
               "les workers vont se disputer les cœurs.")
 
 
@@ -335,7 +388,7 @@ def main():
 
               "précisément pour éviter ce genre d'incident.")
 
-        env = build_vec_env(args.n_envs, args.no_subproc, env_kwargs)
+        env = build_vec_env(n_envs, args.no_subproc, env_kwargs)
 
         paths = mm.checkpoint_paths(args.name, version)
 
@@ -367,6 +420,8 @@ def main():
             kp_vel=args.kp_vel, ki_vel=args.ki_vel, kp_att=args.kp_att,
             kp_rate=args.kp_rate, ki_rate=args.ki_rate, kd_rate=args.kd_rate,
             kp_alt=args.kp_alt, ki_alt=args.ki_alt,
+            action_smoothing_alpha=args.action_smoothing_alpha, coeff_potential=args.coeff_potential,
+            substeps=args.substeps, ego_crop=not args.no_ego_crop,
 
         )
 
@@ -376,7 +431,7 @@ def main():
 
               f"la version source ici, contrairement à --resume).")
 
-        env = build_vec_env(args.n_envs, args.no_subproc, env_kwargs)
+        env = build_vec_env(n_envs, args.no_subproc, env_kwargs)
 
         version = mm.next_minor_version(args.name, args.from_version)
 
@@ -414,12 +469,14 @@ def main():
             kp_vel=args.kp_vel, ki_vel=args.ki_vel, kp_att=args.kp_att,
             kp_rate=args.kp_rate, ki_rate=args.ki_rate, kd_rate=args.kd_rate,
             kp_alt=args.kp_alt, ki_alt=args.ki_alt,
+            action_smoothing_alpha=args.action_smoothing_alpha, coeff_potential=args.coeff_potential,
+            substeps=args.substeps, ego_crop=not args.no_ego_crop,
 
         )
 
         print(f"env_kwargs pour ce nouvel entraînement : {env_kwargs}")
 
-        env = build_vec_env(args.n_envs, args.no_subproc, env_kwargs)
+        env = build_vec_env(n_envs, args.no_subproc, env_kwargs)
 
         version = mm.next_major_version(args.name)
 
@@ -443,7 +500,7 @@ def main():
 
                      n_steps=args.n_steps, batch_size=args.batch_size,
 
-                     seed=args.seed, device=device,
+                     seed=args.seed, device=device, gamma=args.gamma,
 
                      verbose=1, tensorboard_log=args.logdir)
 
@@ -463,38 +520,83 @@ def main():
 
     from stable_baselines3.common.callbacks import CallbackList
 
-    callback = CallbackList([checkpoint_callback, metrics_callback])
+    callbacks = [checkpoint_callback, metrics_callback]
+    ram_callback = None
+    if ram_guard_on:
+        ram_callback = mm.RamGuardCallback(min_free_gb=args.ram_reserve_gb * 0.5, max_tree_gb=args.max_ram_gb)
+        callbacks.append(ram_callback)
+        print(f"RAM au démarrage de l'entraînement : {ram_guard.tree_rss_gb():.2f} Go "
+              f"(processus principal + {n_envs} workers).")
+    callback = CallbackList(callbacks)
+
+    # Tout ce qui suit doit finir par libérer les workers et la mémoire, quelle que soit la sortie
+    # (fin normale, Ctrl+C, manque de RAM, worker mort, bug) — d'où le try/finally.
+    stop_reason, exit_code = None, 0
+    try:
+        try:
+            model.learn(total_timesteps=args.total_timesteps,
+                        callback=callback,
+                        tb_log_name=f"{args.name}_{version}",
+                        reset_num_timesteps=not args.resume)
+            if ram_callback is not None and ram_callback.stop_reason:
+                stop_reason, exit_code = ram_callback.stop_reason, 3
+        except KeyboardInterrupt:
+            stop_reason, exit_code = "interruption clavier (Ctrl+C)", 130
+        except Exception as e:  # noqa: BLE001
+            if not _is_memory_failure(e):
+                raise
+            stop_reason, exit_code = f"{type(e).__name__}: {e}", 2
+            print(f"\n❌ Manque de mémoire (ou worker tué par le système) : {stop_reason}")
+            print("   Les workers sont fermés et la RAM libérée ; relance avec moins d'envs "
+                  "(--n-envs) ou après avoir fermé d'autres programmes.")
+
+        # Sauvegarde dans tous les cas (fin normale ou arrêt propre) : le total est le VRAI nombre de
+        # steps faits, pas args.total_timesteps, et --resume repart de là.
+        total = model.num_timesteps
+        try:
+            mm.save_checkpoint(args.name, version, model, env, total,
+                               extra_meta={"n_envs": n_envs, "n_steps": args.n_steps,
+                                           "batch_size": args.batch_size, "env_kwargs": env_kwargs,
+                                           "seed": args.seed, "gamma": args.gamma,
+                                           "stopped_early": stop_reason})
+            saved = True
+        except Exception as e:  # noqa: BLE001 - déjà en train de s'arrêter : on le dit sans masquer la cause
+            saved = False
+            print(f"❌ Sauvegarde finale impossible : {type(e).__name__}: {e}")
+            exit_code = exit_code or 2
+
+        if stop_reason:
+            print(f"Entraînement ARRÊTÉ : {stop_reason}.")
+            if saved:
+                print(f"{args.name}/{version} sauvegardé à {total} steps — reprise possible avec "
+                      f"--resume (env_kwargs relus du metadata.json).")
+        else:
+            print(f"Entraînement terminé. {args.name}/{version} sauvegardé ({total} steps au total) "
+                  f"dans models/{args.name}/{version}/")
+    finally:
+        model = None
+        ram_guard.release(env)
+        if ram_guard_on:
+            print(f"RAM après nettoyage : {ram_guard.available_gb():.1f} Go libres, "
+                  f"{ram_guard.tree_rss_gb():.2f} Go pour ce processus et ses enfants.")
+    return exit_code
 
 
-
-    model.learn(total_timesteps=args.total_timesteps,
-
-                callback=callback,
-
-                tb_log_name=f"{args.name}_{version}",
-
-                reset_num_timesteps=not args.resume)
-
-
-
-    total = base_timesteps + args.total_timesteps
-
-    mm.save_checkpoint(args.name, version, model, env, total,
-
-                        extra_meta={"n_envs": args.n_envs, "n_steps": args.n_steps,
-
-                                    "batch_size": args.batch_size, "env_kwargs": env_kwargs,
-
-                                    "seed": args.seed})
-
-    print(f"Entraînement terminé. {args.name}/{version} sauvegardé ({total} steps au total) "
-
-          f"dans models/{args.name}/{version}/")
-
-
-
+def _is_memory_failure(e):
+    """Erreur qui ressemble à un manque de mémoire : MemoryError, OOM CUDA, ou un worker SubprocVecEnv
+    disparu (le système l'a tué, ce qui ressort côté parent en EOFError/BrokenPipeError)."""
+    if isinstance(e, (MemoryError, EOFError, BrokenPipeError, ConnectionError)):
+        return True
+    msg = str(e).lower()
+    return type(e).__name__ == "OutOfMemoryError" or "out of memory" in msg or "unable to allocate" in msg
 
 
 if __name__ == "__main__":
 
-    main()
+    try:
+        code = main()
+    finally:
+        # Filet de sécurité si une exception sort de main() avant le nettoyage normal (ex : échec
+        # pendant la création du modèle, alors que les workers tournent déjà).
+        ram_guard.kill_leftover_children()
+    sys.exit(code)
