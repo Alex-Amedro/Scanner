@@ -31,12 +31,16 @@ class BuildingLayout:
     world_x_range: tuple
     world_y_range: tuple
     corridor_x_offsets: list = field(default_factory=list)
+    # Départ à l'extérieur : porche fermé (x_min, x_max, y_min, y_max) au sud de la 1re pièce, relié par
+    # une porte d'entrée centrée en x = entrance_x. None = départ dans la 1re pièce (historique).
+    courtyard: tuple = None
+    entrance_x: float = 0.0
 
 
 def generate_layout(n_rooms=(2, 4), room_width_range=(4.0, 7.0),
                      room_depth_range=(4.0, 7.0), corridor_width=1.6,
                      corridor_length_range=(1.5, 3.0), wall_height=2.6,
-                     rng=None):
+                     rng=None, courtyard=False, courtyard_depth_range=(3.5, 5.0)):
     """Séquence de pièces alignées le long de Y, reliées par des couloirs
     centrés en x=0. Garantit la connectivité par construction (chaîne
     linéaire) — pas de topologie en boucle ou en étoile pour la V1."""
@@ -75,10 +79,22 @@ def generate_layout(n_rooms=(2, 4), room_width_range=(4.0, 7.0),
         offset = rng.uniform(-limit, limit) if limit > 0 else 0.0
         corridor_x_offsets.append(offset)
 
+    # Porche d'entrée : tirages faits APRÈS tous les autres, donc les bâtiments (pièces, couloirs) restent
+    # exactement les mêmes qu'avant quand courtyard=False ou True pour un même rng.
+    courtyard_rect, entrance_x = None, 0.0
+    if courtyard:
+        depth = rng.uniform(*courtyard_depth_range)
+        r0 = rooms[0]
+        limit = max((r0.x_max - r0.x_min) / 2 - gap_half - margin, 0.0)
+        entrance_x = rng.uniform(-limit, limit) if limit > 0 else 0.0
+        courtyard_rect = (r0.x_min, r0.x_max, -depth, 0.0)
+        world_y_range = (-depth - 0.5, world_y_range[1])
+
     return BuildingLayout(rooms=rooms, corridor_width=corridor_width,
                            wall_height=wall_height, world_x_range=world_x_range,
                            world_y_range=world_y_range,
-                           corridor_x_offsets=corridor_x_offsets)
+                           corridor_x_offsets=corridor_x_offsets,
+                           courtyard=courtyard_rect, entrance_x=entrance_x)
 
 
 def _wall_x(y, x_start, x_end, thickness, height, name):
@@ -128,7 +144,14 @@ def generate_building_xml(layout, wall_thickness=0.15):
         xml += _wall_y(room.x_max, room.y_min, room.y_max, wall_thickness,
                         layout.wall_height, name=f"mur_d_{i}")
 
-        if i == 0:
+        if i == 0 and layout.courtyard is not None:
+            # mur sud de la 1re pièce percé de la porte d'entrée
+            ex = layout.entrance_x
+            xml += _wall_x(room.y_min, room.x_min, ex - gap_half, wall_thickness,
+                            layout.wall_height, name="mur_arr_0_g")
+            xml += _wall_x(room.y_min, ex + gap_half, room.x_max, wall_thickness,
+                            layout.wall_height, name="mur_arr_0_d")
+        elif i == 0:
             xml += _wall_x(room.y_min, room.x_min, room.x_max, wall_thickness,
                             layout.wall_height, name=f"mur_arr_{i}")
         else:
@@ -164,6 +187,14 @@ def generate_building_xml(layout, wall_thickness=0.15):
             xml += (f'<geom name="sol_couloir_{i}" type="box" '
                     f'pos="{cx:.3f} {(y0+y1)/2:.3f} -0.05" '
                     f'size="{gap_half:.3f} {(y1-y0)/2:.3f} 0.05" rgba="0.3 0.3 0.33 1"/>\n')
+
+    if layout.courtyard is not None:
+        cx0, cx1, cy0, cy1 = layout.courtyard
+        xml += _wall_y(cx0, cy0, cy1, wall_thickness, layout.wall_height, name="mur_cour_g")
+        xml += _wall_y(cx1, cy0, cy1, wall_thickness, layout.wall_height, name="mur_cour_d")
+        xml += _wall_x(cy0, cx0, cx1, wall_thickness, layout.wall_height, name="mur_cour_s")
+        xml += (f'<geom name="sol_cour" type="box" pos="{(cx0+cx1)/2:.3f} {(cy0+cy1)/2:.3f} -0.05" '
+                f'size="{(cx1-cx0)/2:.3f} {(cy1-cy0)/2:.3f} 0.05" rgba="0.42 0.40 0.36 1"/>\n')
 
     x_min, x_max = layout.world_x_range
     y_min, y_max = layout.world_y_range

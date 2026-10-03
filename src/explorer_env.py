@@ -124,7 +124,8 @@ _ACTUATORS_XML_TEMPLATE = """
 
 LEGACY_OBS_KEYS = ("local_crop", "coverage", "frontier_vector", "relief_rays", "kinematics",
                    "proximity_rays", "last_action")  # observation historique (v1 à v3), défaut de l'env
-VALID_OBS_KEYS = LEGACY_OBS_KEYS + ("velocity", "path_vector")
+VALID_OBS_KEYS = LEGACY_OBS_KEYS + ("velocity",)
+OBSOLETE_ENV_KWARGS = {"coeff_progress", "progress_mode"}
 
 
 class ExplorerEnv(gym.Env):
@@ -149,11 +150,17 @@ class ExplorerEnv(gym.Env):
 
                  substeps=10, ego_crop=True, use_last_action=True, time_penalty=0.0,
                  obs_keys=None, fixed_altitude=False, altitude_kp=2.0,
-                 no_yaw=False, coeff_progress=0.0, progress_mode="euclid",
+                 no_yaw=False, action_mode="velocity", start_outside=False, drag=0.0,
 
-                 max_steps=2000, seed=None):
+                 max_steps=2000, seed=None, **obsolete):
 
         super().__init__()
+
+        # Réglages SUPPRIMÉS mais encore présents dans le metadata.json des anciens modèles : acceptés et
+        # ignorés (ils n'influencent pas l'évaluation d'un modèle déjà entraîné). Tout autre inconnu = erreur.
+        unexpected = set(obsolete) - OBSOLETE_ENV_KWARGS
+        if unexpected:
+            raise TypeError(f"ExplorerEnv: arguments inconnus {sorted(unexpected)}")
 
 
 
@@ -247,23 +254,21 @@ class ExplorerEnv(gym.Env):
         # no_yaw=True -> 2 sorties (vx, vy) : le LiDAR couvre 360 deg, le drone n'a aucun besoin de
         # tourner, et un lacet libre fait dériver le cap au hasard (donc tourner tout son repère).
         assert not no_yaw or fixed_altitude, "no_yaw suppose fixed_altitude"
+        # action_mode : "velocity" (historique : la sortie est une consigne de vitesse) ou "accel" (la sortie est
+        # une accélération, cf. _outer_accel_loop).
+        assert action_mode in ("velocity", "accel"), action_mode
+        self.action_mode = action_mode
         self.no_yaw = no_yaw
         self.yaw_hold_kp = 4.0   # 1/s : consigne de lacet = kp * erreur de cap
         self._yaw_target = 0.0
         self.n_act = 2 if no_yaw else (3 if fixed_altitude else 4)
 
-        # Récompense de PROGRESSION vers une frontière visée : coeff_progress * (mètres gagnés vers
-        # elle). La cible reste la même tant qu'elle existe (pas de saut quand la "plus proche"
-        # change), donc pas de bruit de bascule ; aller-retour = gain net nul.
-        self.coeff_progress = coeff_progress
-        # "euclid" : progression vers la frontière visée à vol d'oiseau ; "path" : le long du chemin
-        # connu (BFS autour des murs). path_vector = direction du prochain point de ce chemin.
-        self.progress_mode = progress_mode
-        self._need_path = ("path_vector" in self.obs_keys) or progress_mode == "path"
-        self._path_info = None
-        self._prog_prev_len = None
-        self._prog_target = None
-        self._prog_prev_dist = 0.0
+        # start_outside=True : le drone démarre dans un porche fermé devant une porte d'entrée, pas au
+        # milieu de la 1re pièce (où le LiDAR révélait d'emblée 30 à 60 % du bâtiment).
+        self.start_outside = start_outside
+        # Frottement de l'air LINÉAIRE (1/s) : force = -masse * drag * vitesse. À 0 le drone glisse comme sur de la
+        # glace dès qu'il se redresse ; un vrai drone freine tout seul (de l'ordre de 0,2 à 0,5 1/s).
+        self.drag = drag
 
         self.task = task
 
@@ -287,8 +292,6 @@ class ExplorerEnv(gym.Env):
             "last_action": spaces.Box(low=-1.0, high=1.0, shape=(self.n_act,), dtype=np.float32),
             # vitesse du drone dans SON repère : (vx, vy, vitesse de lacet) — le strict minimum
             "velocity": spaces.Box(low=-50.0, high=50.0, shape=(3,), dtype=np.float32),
-            # (angle ego du prochain point du chemin, distance à ce point, longueur du chemin, valide)
-            "path_vector": spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32),
         }
         self.observation_space = spaces.Dict({k: all_spaces[k] for k in self.obs_keys})
 
@@ -342,7 +345,7 @@ class ExplorerEnv(gym.Env):
 
     def _build_xml(self):
 
-        self.layout = generate_layout(n_rooms=self.n_rooms, rng=self._rng)
+        self.layout = generate_layout(n_rooms=self.n_rooms, rng=self._rng, courtyard=self.start_outside)
 
         building_xml = generate_building_xml(self.layout)
 
@@ -350,7 +353,11 @@ class ExplorerEnv(gym.Env):
 
         room0 = self.layout.rooms[0]
 
-        spawn_x, spawn_y = room0.center
+        if self.layout.courtyard is not None:   # départ dans le porche, devant le bâtiment
+            cx0, cx1, cy0, cy1 = self.layout.courtyard
+            spawn_x, spawn_y = (cx0 + cx1) / 2, (cy0 + cy1) / 2
+        else:
+            spawn_x, spawn_y = room0.center
 
         self._spawn_xy = (spawn_x, spawn_y)
 
@@ -417,6 +424,8 @@ class ExplorerEnv(gym.Env):
         self.data = mujoco.MjData(self.model)
 
         mujoco.mj_forward(self.model, self.data)
+        self._drone_bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "drone_body")
+        self._drone_mass = float(self.model.body_mass[self._drone_bid])
 
         self._dt_sub = self.model.opt.timestep
 
@@ -430,10 +439,6 @@ class ExplorerEnv(gym.Env):
 
         self._last_action = np.zeros(self.n_act, dtype=np.float32)
 
-        self._prog_target = None
-        self._prog_prev_dist = 0.0
-        self._path_info = None
-        self._prog_prev_len = None
 
 
 
@@ -487,6 +492,29 @@ class ExplorerEnv(gym.Env):
         a_body_x = a_des_world_x * np.cos(yaw) + a_des_world_y * np.sin(yaw)
         a_body_y = -a_des_world_x * np.sin(yaw) + a_des_world_y * np.cos(yaw)
         max_tilt = np.radians(self.max_tilt_angle_deg)
+        pitch_des = np.clip(a_body_x / 9.81, -max_tilt, max_tilt)
+        roll_des = np.clip(-a_body_y / 9.81, -max_tilt, max_tilt)
+
+        err_vz = vz_des - vel_lin[2]
+        self._int_vz = np.clip(self._int_vz + err_vz * dt, -self._int_alt_max, self._int_alt_max)
+        thrust_base = self._hover_thrust_ctrl + self.kp_alt * err_vz + self.ki_alt * self._int_vz
+        return roll_des, pitch_des, thrust_base, yaw_rate_des
+
+    def _outer_accel_loop(self, cmd_xy, vz_des, yaw_rate_des):
+        """Mode 'accel' (interface type "mode angle") : le réseau choisit directement l'ACCÉLÉRATION
+        horizontale (donc l'inclinaison), sans boucle de vitesse entre lui et l'attitude.
+        a = a_max * commande - c * vitesse  : le frottement virtuel c = a_max / max_speed plafonne la
+        vitesse à max_speed pour une commande à fond. Les boucles internes stabilisent toujours."""
+        yaw = _quat_to_yaw(self.data.body("drone_body").xquat)
+        vel_lin = self.data.qvel[0:3]
+        dt = self._dt_sub * self.substeps
+        max_tilt = np.radians(self.max_tilt_angle_deg)
+        a_max = 9.81 * max_tilt
+        c = a_max / max(self.max_speed, 1e-6)
+        vx_b = vel_lin[0] * np.cos(yaw) + vel_lin[1] * np.sin(yaw)
+        vy_b = -vel_lin[0] * np.sin(yaw) + vel_lin[1] * np.cos(yaw)
+        a_body_x = a_max * float(cmd_xy[0]) - c * vx_b
+        a_body_y = a_max * float(cmd_xy[1]) - c * vy_b
         pitch_des = np.clip(a_body_x / 9.81, -max_tilt, max_tilt)
         roll_des = np.clip(-a_body_y / 9.81, -max_tilt, max_tilt)
 
@@ -550,8 +578,14 @@ class ExplorerEnv(gym.Env):
             yaw_rate_des = float(np.clip(self.yaw_hold_kp * err, -self.max_yaw_rate, self.max_yaw_rate))
         target = (float(v_xy[0]), float(v_xy[1]), vz_des, yaw_rate_des)
 
-        setpoint = self._outer_velocity_loop(target)
+        if self.action_mode == "accel":
+            cxy = cmd[:2] / max(1.0, float(np.linalg.norm(cmd[:2])))
+            setpoint = self._outer_accel_loop(cxy, vz_des, yaw_rate_des)
+        else:
+            setpoint = self._outer_velocity_loop(target)
         for _ in range(self.substeps):
+            if self.drag > 0.0:
+                self.data.xfrc_applied[self._drone_bid, 0:3] = -self._drone_mass * self.drag * self.data.qvel[0:3]
             self.data.ctrl[:] = self._inner_attitude_rate_loop(setpoint)
             mujoco.mj_step(self.model, self.data)
             if self.data.ncon > 0:  # contact en cours de route : ne pas laisser un rebond l'effacer
@@ -652,7 +686,6 @@ class ExplorerEnv(gym.Env):
         else:
 
             reward = (n_new_cells + self.coeff_potential * (phi - self._last_phi)
-                      + self._progress_reward(pos)
                       + bonus_alignement - penalite_proximite)
 
             # Coût de durée : sans lui, rester en vie sans explorer ne coûte rien (alors que traverser
@@ -751,44 +784,6 @@ class ExplorerEnv(gym.Env):
             self.viewer = None
         self._viewer_model = None
         self.model = self.data = self.grid = None
-
-    def _progress_reward(self, pos):
-        """coeff_progress * (distance au but précédent - distance au but actuel), en mètres."""
-        if self.coeff_progress <= 0.0:
-            return 0.0
-        if self.progress_mode == "path":
-            # Potentiel = -(longueur du chemin vers la frontière la plus proche PAR LE CHEMIN). Un saut
-            # de plus de 25 cm en un step n'est pas du mouvement (le drone fait 12 cm max par step) :
-            # c'est la frontière qui a changé ou disparu -> ignoré, jamais puni.
-            if self._path_info is None:
-                self._prog_prev_len = None
-                return 0.0
-            length = self._path_info["len_m"]
-            prev, self._prog_prev_len = self._prog_prev_len, length
-            if prev is None or abs(prev - length) > 0.25:
-                return 0.0
-            return self.coeff_progress * (prev - length)
-        valid = [f["world_xy"] for f in self._last_frontiers if f["valid"] > 0 and f["world_xy"] is not None]
-        if not valid:
-            self._prog_target = None
-            return 0.0
-        here = np.array([pos[0], pos[1]])
-        if self._prog_target is not None:
-            # la cible suivie existe-t-elle encore (à 1 m près : la frontière bouge avec le scan) ?
-            tgt = np.array(self._prog_target)
-            near = [np.array(w) for w in valid if np.hypot(w[0] - tgt[0], w[1] - tgt[1]) < 1.0]
-            if near:
-                new = min(near, key=lambda w: np.hypot(*(w - tgt)))
-                d_now = float(np.linalg.norm(new - here))
-                gain = self._prog_prev_dist - d_now   # mètres gagnés depuis le step précédent
-                self._prog_target = (float(new[0]), float(new[1]))
-                self._prog_prev_dist = d_now
-                return self.coeff_progress * gain
-        # pas de cible (ou elle a disparu = explorée) : on prend la plus proche, sans récompense
-        w = min(valid, key=lambda w: np.hypot(w[0] - here[0], w[1] - here[1]))
-        self._prog_target = (float(w[0]), float(w[1]))
-        self._prog_prev_dist = float(np.hypot(w[0] - here[0], w[1] - here[1]))
-        return 0.0
 
     def _in_corridor(self, x, y):
 
@@ -916,13 +911,9 @@ class ExplorerEnv(gym.Env):
 
 
 
-        self._path_info = None
         self._last_frontiers = self.grid.frontier_features(
 
             pos[0], pos[1], yaw, k=self.k_frontiers)
-
-        if self._need_path:
-            self._path_info = self.grid.path_to_nearest_frontier(pos[0], pos[1])
 
 
 
@@ -998,16 +989,6 @@ class ExplorerEnv(gym.Env):
 
 
 
-        pv = np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float32)  # pas de chemin : valid = 0
-        if self._path_info is not None:
-            wx, wy = self._path_info["waypoint_xy"]
-            ang = np.arctan2(wy - pos[1], wx - pos[0]) - yaw
-            ang = (ang + np.pi) % (2 * np.pi) - np.pi
-            pv = np.array([ang / np.pi,
-                           min(float(np.hypot(wx - pos[0], wy - pos[1])) / 1.2, 1.0),
-                           min(self._path_info["len_m"] / 20.0, 1.0),
-                           1.0], dtype=np.float32)
-
         full = {
             "local_crop": local_crop.astype(np.float32),
             "coverage": coverage,
@@ -1018,7 +999,6 @@ class ExplorerEnv(gym.Env):
             "last_action": (self._last_action.copy() if self.use_last_action
                             else np.zeros(self.n_act, dtype=np.float32)),
             "velocity": np.array([vel_body[0], vel_body[1], vel_ang[2]], dtype=np.float32),
-            "path_vector": pv,
         }
         return {k: full[k] for k in self.obs_keys}
 

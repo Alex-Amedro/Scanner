@@ -1091,6 +1091,122 @@ référence. Les autres leviers de freinage (`--kp-vel 3`, `--max-tilt-angle-deg
 **Lecture** : les deux comptent. À vérifier ensuite : budget plus long, `max_speed`, puis réintroduire
 `last_action` / crop / potentiel UN par un avec le critère ci-dessus (étape 5 du plan).
 
+### Réactivité (`agile`) et 2e seed — le point faible : la ROBUSTESSE entre seeds
+
+Config commune : entrées minimales (proximity_rays, frontier_vector x2, velocity), 2 sorties (vx, vy) + maintien de cap, altitude
+bloquée, mort -50, `--coeff-progress 10`, 350k steps, 8 envs CPU. Évaluation : 30 épisodes, 3 pièces puis 2-4 pièces.
+| Run | seed | 3 pièces | 2-4 pièces |
+|---|---|---|---|
+| `ctrl6` (6 m/s) | 42 | 83% victoire / 86% couv. | 80% / 85% |
+| `ctrl6_s2` (identique) | **43** | **7%** / 70% | **10%** / 68% |
+| `agile` (`--kp-vel 3 --max-tilt-angle-deg 45`) | 42 | 77% / 86,5% | 77% / 85,8% |
+Mesure de réactivité (+v -> -v) : 2,0 s -> 1,4 s à 6 m/s. Visuellement (utilisateur) : `agile` est « trop abusé », rapide,
+peut-être trop, mais pour des pompiers aller vite est voulu ; peut-être plus de temps d'apprentissage nécessaire.
+**Fait important : à config identique, le seed 42 réussit (83%) et le seed 43 échoue (7%).** Les deux runs qui réussissent
+décollent vers 120-200k steps ; le seed 43 reste à ~0% de victoires jusqu'au bout (collisions 97%) avec la même baisse d'entropie.
+Les 80% ne sont donc PAS fiables tels quels : tout chiffre publié devra venir de plusieurs seeds. (`agile` n'a qu'un seed.)
+
+**Vérification de reproductibilité (suite à un doute légitime de l'utilisateur : « tu as changé quelque chose ? »)** :
+1. Réglages enregistrés de `ctrl6` et `ctrl6_s2` : identiques, seuls le seed, le nom et l'heure diffèrent ; code inchangé depuis
+   23:44 (avant les 3 entraînements), identique au commit `f16c9de`.
+2. **Ré-évaluation du fichier `ctrl6` d'origine avec le code du lendemain** : 83% / 86,1% (3 pièces) et 80% / 85,2% (2-4 pièces),
+   IDENTIQUE à la décimale -> le comportement du vol/contrôleur/vitesses n'a pas changé.
+3. **Entraînement `rep42`** (seed 42, 8 envs, 352 256 steps, aucun arrêt anticipé) : **83% / 86,1%**, identique à `ctrl6` ; la
+   courbe d'entraînement se superpose à la virgule près (constat de l'utilisateur). -> **l'entraînement est déterministe à seed égal.**
+4. Conclusion : le seed 43 (`ctrl6_s2`, 7%) est un VRAI effet du seed, pas un défaut de code ni de reproduction. Sur 2 seeds valides
+   on a 1 réussite et 1 échec ; le taux de réussite réel reste inconnu.
+**Incident à ne pas répéter** : un premier « seed 42 refait » était invalide : mes mesures lancées en parallèle ont fait baisser la
+RAM, le garde-fou a réduit à 5 envs puis arrêté l'entraînement à 236 750 steps (code de sortie 3). Règle : AUCUNE autre tâche pendant un
+entraînement/test de reproductibilité, et vérifier `n_envs` et `steps` dans `metadata.json` avant de lire un résultat.
+**Vitesses mesurées** (12 bâtiments, 3 pièces) : vitesse moyenne `goal2_d50` 2,3 m/s, `ctrl6` 3,1, `ctrl6_s2` 2,5, `agile` 3,6 ; part du
+temps à plus de 4 m/s : 13% / 34% / 10% / 50%. Réglages `max_speed`, `kp_vel`, inclinaison identiques entre `goal2_d50`, `ctrl6`, `ctrl6_s2`.
+
+### Protocole léger à 2 seeds (42 = connu bon, 43 = connu mauvais) et interface de commande
+
+Constat de l'utilisateur (à l'oeil) : trop lent, trop prudent près des portes, à-coups. Mesuré : victoires en ~101 steps en génération 1
+(couples directs) contre ~195 pour `ctrl6`. Recherche web : les politiques à CONSIGNE DE VITESSE donnent un vol « quasi stationnaire »,
+alors que poussée + vitesses de rotation (CTBR) ou commandes d'attitude permettent des manoeuvres bien plus agressives (benchmark
+arXiv 2202.10796) ; PX4 fait sortir du contrôleur de vitesse une ACCÉLÉRATION, convertie en inclinaison.
+Essais (3 pièces, 30 épisodes, 350k steps, 8 envs, mort -50, progression 10, cap maintenu) :
+| Run | seed | victoire | couv. | steps pour gagner | vitesse moy. | cmd saturées |
+|---|---|---|---|---|---|---|
+| `ctrl6` (vitesse, 35 deg) | 42 | 83% | 86% | ~199 | 3,1 m/s | 24% |
+| `ctrl6_s2` | 43 | 7% | 70% | - | 2,5 | 14% |
+| inclinaison 25 deg | 42 | 70% | 87% | - | 2,2 | 8% |
+| inclinaison 25 deg | 43 | 7% | 71% | - | 2,5 | 29% |
+| `--max-speed 4.5` | 42 | 17% | 70% | - | 1,8 | 12% |
+| **`--action-mode accel`** | 42 | **97%** | **90,1%** | 230 | 2,6 | 13% |
+| `--action-mode accel` | 43 | 13% | 77% | 283 | - | - |
+Lecture : (1) réduire vitesse ou inclinaison adoucit mais ralentit, et `max_speed` plus bas échoue (3e fois) ; (2) le mode accélération
+(`_outer_accel_loop` : a = a_max * commande - c * vitesse, c = a_max/max_speed) donne le meilleur taux jamais vu (97%) sur le seed 42 MAIS
+ne règle pas le seed 43 (13%) ni la lenteur (230 steps) : le drone vole calmement à ~2,6 m/s alors que 6 m/s sont permis. (3) le seed 43
+échoue avec TOUTES les variantes (7%, 7%, 13%) : son échec est lié à l'initialisation, pas à l'interface de commande.
+Mesures du mode accélération (contacts désactivés) : freinage à fond depuis 5,6 m/s en 3,5 m (4,0 m en mode vitesse) ; inversion +v -> -v
+non plus rapide (2,4 s contre 2,0 s) à cause du frottement virtuel.
+Pistes pour la vitesse (non testées) : `--time-penalty` (0,05 à 0,1 à l'échelle actuelle, mort -50), `--coeff-progress` plus élevé,
+frottement virtuel plus faible.
+
+### Récompense minimale + départ à l'extérieur (4 octobre) — décisions de l'utilisateur appliquées
+
+Décisions : suppression de la récompense de progression (et du code A*/BFS, des modes de progression) ; `coeff_potential` = 0 ; CNN +
+`last_action` à retester ; lacet plus tard ; **départ à l'extérieur** (porche fermé de 3,5-5 m devant une porte d'entrée dans le mur sud de la
+1re pièce ; `start_outside`, défaut de `train.py`, `--start-inside` pour l'ancien) : couverture au spawn 11 % (au lieu de 39 %), pièces et
+couloirs identiques à avant, vol scripté extérieur -> intérieur sans collision 30/30. Non-régression après le ménage : `ctrl6` 83 %/86,1 %
+et `accel_s42` 97 %/90,1 % inchangés. Les anciens `metadata.json` (avec `coeff_progress`, `progress_mode`) restent chargeables (réglages ignorés).
+Résultats (3 pièces, départ extérieur, 350k, seed 42, mode vitesse 35 deg, mort -50, aucun but dense) :
+| Run | victoire | mort | couverture (réelle, départ ~11 %) | vitesse moy. |
+|---|---|---|---|---|
+| `out_min_s42` (27 entrées) | 3 % | 97 % | 62 % | 2,4 m/s |
+| `out_full_s42` (+ CNN + `last_action`) | 3 % | 97 % | 58 % | 2,4 m/s |
+Sans signal de but, ça n'atteint pas 90 % mais la couverture réelle atteint ~60 % (soit ~50 points gagnés depuis le départ) : la récompense
+« cellules + mort » seule apprend à explorer, pas à finir. Le CNN + `last_action` n'améliore rien à ce budget.
+**Cycle limite mesuré** (`out_min_s42`, seed 9000, aussi vu à l'oeil par l'utilisateur : « il part à gauche, à droite, à l'infini devant la
+3e porte ») : sur 200 steps il parcourt 8,7 m mais ne se déplace que de 0,6 m ; balancement de ±1,5 m en x avec période ~4 s sur la commande
+avant/arrière et ~1,3 s sur le côté.
+**Physique modifiée SANS réentraîner (même modèle `out_min_s42`)** : référence 3 % de victoires ; `drag=0,3` : 20 % (couv. 71 %) ;
+`drag=0,6` : 7 % ; `kp_vel=3` : 3 % ; `ki_vel=0` (sans intégrale) : 17 % (couv. 64 %). Le frottement de l'air (paramètre `drag`, force =
+-masse*drag*vitesse, 0 par défaut) et l'intégrale du contrôleur de vitesse (dépassement par accumulation) pèsent donc sur le comportement,
+sans que ce soit un correctif (30 épisodes, un seul modèle, politique non entraînée pour ces physiques). À confirmer en RÉENTRAÎNANT.
+Comparaison honnête à faire : réintroduire l'ancien contrôle direct (couples) comme `action_mode` dans le MÊME environnement pour trancher
+objectivement « le PID est-il en cause ? » (l'utilisateur est convaincu que oui, non démontré).
+
+### DÉCOUVERTE (4 octobre) : le contrôleur interne était mal réglé — l'amortissement `--damping 0.05` de toutes nos commandes
+
+Suite à un conseil externe (régler UNE boucle à la fois, de l'intérieur vers l'extérieur, sans RL, en regardant des COURBES) :
+`src/step_response.py` trace les réponses indicielles de la boucle de taux, d'attitude et de vitesse isolées (`diagnostics/step_response.png`).
+Avec les réglages de TOUS nos runs (`--damping 0.05`, `kp_rate 0.15`, `kp_att 6`, `kp_vel 1.5`) :
+- **boucle de taux : n'atteint jamais la consigne** (plafonne à ~60 % puis rattrape très lentement) ;
+- **boucle d'attitude : 414 ms de montée, 1,19 s d'établissement** pour 10 deg (un vrai drone : 100-200 ms) ;
+- boucle de vitesse : propre mais lente (~1,5 s pour 6 m/s).
+Le contrôleur n'oscille donc pas : il est SLUGGISH et sur-amorti (la « glace » de l'utilisateur). Cause : `joint_damping` (`--damping 0.05`, hérité de
+la génération 1 où il servait à calmer la toupie en contrôle de couples) freine TOUTE rotation, du même ordre que le gain de taux (0,15*gear 0,5 =
+0,075) : erreur permanente de 40 %. Avec `--damping 0` : taux 86 ms, attitude 252 ms ; avec en plus `--kp-rate 0.4 --kp-att 20 --kp-vel 4` :
+**taux 36 ms (0,8 % de dépassement), attitude 76 ms (1,1 %), vitesse 380-720 ms selon la consigne** (limitée par l'inclinaison max : 6 m/s
+demande > 0,87 s quoi qu'on fasse). Il n'y avait que des réglages à changer (flags existants), aucun nouveau code.
+**Run de confirmation** (même config que `out_min_s42` : entrées minimales, départ extérieur, cellules + mort -50 + victoire, AUCUN signal de but ;
+seul le contrôleur change : `--damping 0 --kp-rate 0.4 --kp-att 20 --kp-vel 4`), 350k steps, 3 pièces, 30 épisodes :
+| Run | seed | victoire | mort | couverture | épisodes « coincés » | vitesse moy. | steps/victoire |
+|---|---|---|---|---|---|---|---|
+| ancien réglage (`out_min_s42`) | 42 | 3 % | 97 % | 62 % | - | 2,4 m/s | - |
+| **`plant_s42`** | 42 | **97 %** | 3 % | 89 % | 0/30 | **4,2 m/s** | 206 |
+| **`plant_s43`** | **43** | **87 %** | 13 % | 87 % | 0/30 | 3,5 m/s | 261 |
+Le seed 43, qui échouait avec TOUTES les configurations précédentes (7 %, 7 %, 13 %, 3 %), réussit : la « loterie des seeds » venait aussi du
+contrôleur trop lent. Le va-et-vient devant les portes a disparu (0/30), le drone vole nettement plus vite (steps/victoire mesurés en PARTANT
+DE L'EXTÉRIEUR, couverture de départ 11 % : non comparables aux anciens 195-230 steps qui partaient de ~39 %). Sans récompense de progression,
+sans carte, avec 27 entrées. Valeurs par défaut de `train.py` mises à jour (`kp_rate 0.4`, `kp_att 20`, `kp_vel 4`, `damping 0`) ; les anciens
+modèles gardent leurs valeurs (écrites dans leur `metadata.json`). Limite : 2 seeds, 30 épisodes chacun, 3 pièces alignées.
+
+**Généralisation des modèles à contrôleur réglé** (2 à 4 pièces, départ extérieur, bâtiments JAMAIS utilisés pour les choisir : seeds 9100-9129) :
+`plant_s42` **87 %** victoire / 13 % mort / couverture 85,8 % / 204 steps ; `plant_s43` **77 %** / 23 % / 83,5 % / 274 steps. Un peu en dessous des
+97 % / 87 % sur les 3 pièces des seeds 9000-9029 (la plage 2-4 contient des bâtiments à 4 pièces plus durs, et d'autres bâtiments), mais pas
+d'effondrement : pas de sur-apprentissage manifeste du jeu de test.
+**Retour visuel de l'utilisateur (4 oct.)** : « vraiment mieux à fond, trop cool enfin » ; le mouvement est « abusé » (trop de force) -> piste :
+inclinaison max plus faible (28 deg, 25 deg) avec le contrôleur désormais réglé, à tester sur les seeds 42 et 43.
+**Ménage du 4 oct.** : modèles conservés `plant_s42`, `plant_s43` (référence actuelle), `ctrl6` et `accel_s42` (ancrages de NON-RÉGRESSION du code :
+leurs résultats 83 %/86,1 % et 97 %/90,1 % doivent rester identiques à la décimale), `explorer/` (v1, v3 de l'utilisateur). Supprimés (résultats
+consignés plus haut) : accel_s43, agile, cnn1, ctrl6_s2, goal2_d50, out_full_s42, out_full_s43, out_min_s42, rep42, spd45_s42, spd45_s43,
+tilt25_s42, tilt25_s43, leurs courbes tensorboard, et `src/eval_logs/`.
+
 ## FEUILLE DE ROUTE (v2) — objectif : une vidéo qui marche, un drone qui visite un bâtiment et produit une carte pour les pompiers
 
 **Objectif de fin** : vidéo d'un drone devant un bâtiment qui le visite seul et construit une carte utilisable ; projet fiable

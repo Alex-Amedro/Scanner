@@ -280,23 +280,27 @@ def main():
     parser.add_argument("--n-rooms-min", type=int, default=3)
     parser.add_argument("--n-rooms-max", type=int, default=3,
                         help="Nombre de pièces tiré entre min et max (défaut 3-3 : on commence direct à 3 pièces).")
-    parser.add_argument("--progress-mode", choices=["euclid", "path"], default="euclid",
-                        help="euclid = progression à vol d'oiseau vers la frontière visée ; path = progression "
-                             "le long du chemin connu (BFS autour des murs).")
+    parser.add_argument("--action-mode", choices=["velocity", "accel"], default="velocity",
+                        help="velocity = la sortie du réseau est une consigne de vitesse (historique) ; "
+                             "accel = une accélération/inclinaison directe, avec frottement virtuel qui plafonne à --max-speed.")
+    parser.add_argument("--start-inside", action="store_true",
+                        help="Démarre au milieu de la 1re pièce (ancien comportement). Par défaut : à l'EXTÉRIEUR, "
+                             "dans un porche devant la porte d'entrée, la couverture comptée depuis presque zéro.")
+    parser.add_argument("--drag", type=float, default=0.0,
+                        help="Frottement de l'air linéaire (1/s) : le drone freine tout seul au lieu de glisser. "
+                             "0 = aucun (historique), 0,2 à 0,5 = réaliste.")
     parser.add_argument("--no-yaw", action="store_true",
                         help="2 sorties (vx, vy), pas de lacet (suppose l'altitude bloquée).")
-    parser.add_argument("--coeff-progress", type=float, default=0.0,
-                        help="Récompense par mètre gagné vers la frontière visée (signal de but dense).")
     parser.add_argument("--no-last-action", action="store_true",
                         help="Met l'observation last_action à zéro (ablation).")
     parser.add_argument("--gamma", type=float, default=0.99, help="Facteur d'actualisation PPO.")
     parser.add_argument("--max-climb-rate", type=float, default=2.0)
     parser.add_argument("--max-yaw-rate", type=float, default=2.0)
     parser.add_argument("--max-tilt-angle-deg", type=float, default=35.0)
-    parser.add_argument("--kp-vel", type=float, default=1.5)
+    parser.add_argument("--kp-vel", type=float, default=4.0)
     parser.add_argument("--ki-vel", type=float, default=0.1)
-    parser.add_argument("--kp-att", type=float, default=6.0)
-    parser.add_argument("--kp-rate", type=float, default=0.15)
+    parser.add_argument("--kp-att", type=float, default=20.0)
+    parser.add_argument("--kp-rate", type=float, default=0.4)
     parser.add_argument("--ki-rate", type=float, default=0.20)
     parser.add_argument("--kd-rate", type=float, default=0.003)
     parser.add_argument("--kp-alt", type=float, default=0.15)
@@ -450,7 +454,7 @@ def main():
             substeps=args.substeps, ego_crop=not args.no_ego_crop,
             use_last_action=not args.no_last_action, time_penalty=args.time_penalty,
             obs_keys=args.obs_keys, fixed_altitude=not args.free_altitude, k_frontiers=args.k_frontiers,
-            no_yaw=args.no_yaw, coeff_progress=args.coeff_progress, progress_mode=args.progress_mode,
+            no_yaw=args.no_yaw, action_mode=args.action_mode, start_outside=not args.start_inside, drag=args.drag,
             n_rooms=(args.n_rooms_min, args.n_rooms_max),
 
         )
@@ -503,7 +507,7 @@ def main():
             substeps=args.substeps, ego_crop=not args.no_ego_crop,
             use_last_action=not args.no_last_action, time_penalty=args.time_penalty,
             obs_keys=args.obs_keys, fixed_altitude=not args.free_altitude, k_frontiers=args.k_frontiers,
-            no_yaw=args.no_yaw, coeff_progress=args.coeff_progress, progress_mode=args.progress_mode,
+            no_yaw=args.no_yaw, action_mode=args.action_mode, start_outside=not args.start_inside, drag=args.drag,
             n_rooms=(args.n_rooms_min, args.n_rooms_max),
 
         )
