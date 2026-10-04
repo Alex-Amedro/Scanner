@@ -31,7 +31,7 @@ class ExplorerFeaturesExtractor(BaseFeaturesExtractor):
             self.cnn_head = nn.Sequential(nn.Linear(cnn_flat_dim, cnn_out_dim), nn.ReLU())
 
         # Ordre FIXE (celui des modèles historiques : changer l'ordre casserait leurs poids).
-        order = ["frontier_vector", "relief_rays", "kinematics", "coverage", "proximity_rays", "last_action", "velocity"]
+        order = ["frontier_vector", "relief_rays", "kinematics", "coverage", "proximity_rays", "last_action", "velocity", "v_ref"]
         self.scalar_keys = [k for k in order if k in observation_space.spaces]
         scalar_dim = sum(observation_space[k].shape[0] for k in self.scalar_keys)
         self.mlp = nn.Sequential(

@@ -35,6 +35,7 @@ from gymnasium import spaces
 
 
 from building_generator import compute_navigable_rects, generate_building_xml, generate_layout
+from house_generator import generate_house, generate_house_xml
 
 from occupancy_grid import OccupancyGrid
 
@@ -124,7 +125,7 @@ _ACTUATORS_XML_TEMPLATE = """
 
 LEGACY_OBS_KEYS = ("local_crop", "coverage", "frontier_vector", "relief_rays", "kinematics",
                    "proximity_rays", "last_action")  # observation historique (v1 à v3), défaut de l'env
-VALID_OBS_KEYS = LEGACY_OBS_KEYS + ("velocity",)
+VALID_OBS_KEYS = LEGACY_OBS_KEYS + ("velocity", "v_ref")
 OBSOLETE_ENV_KWARGS = {"coeff_progress", "progress_mode"}
 
 
@@ -150,7 +151,9 @@ class ExplorerEnv(gym.Env):
 
                  substeps=10, ego_crop=True, use_last_action=True, time_penalty=0.0,
                  obs_keys=None, fixed_altitude=False, altitude_kp=2.0,
-                 no_yaw=False, action_mode="velocity", start_outside=False, drag=0.0,
+                 no_yaw=False, action_mode="velocity", start_outside=False, drag=0.0, coeff_action_rate=0.0, coeff_tilt_rate=0.0, ref_accel_limit=0.0, direct_tau=0.15, direct_a_max=12.0, action_deadzone=0.0,
+                 yaw_follow=False, yaw_follow_rate=1.5, yaw_follow_min_speed=0.8, yaw_follow_offset=-np.pi / 2,
+                 building="chain", house_level=2,
 
                  max_steps=2000, seed=None, **obsolete):
 
@@ -256,10 +259,24 @@ class ExplorerEnv(gym.Env):
         assert not no_yaw or fixed_altitude, "no_yaw suppose fixed_altitude"
         # action_mode : "velocity" (historique : la sortie est une consigne de vitesse) ou "accel" (la sortie est
         # une accélération, cf. _outer_accel_loop).
-        assert action_mode in ("velocity", "accel"), action_mode
+        assert action_mode in ("velocity", "accel", "direct"), action_mode
         self.action_mode = action_mode
         self.no_yaw = no_yaw
         self.yaw_hold_kp = 4.0   # 1/s : consigne de lacet = kp * erreur de cap
+        # yaw_follow=True : le NEZ du drone tourne vers sa direction de déplacement (aspect réaliste). C'est le
+        # contrôleur bas niveau qui s'en charge : le réseau ne voit pas le cap, ses entrées et ses sorties restent
+        # alignées sur les axes du monde (identique à cap fixe = 0). Rotation limitée à yaw_follow_rate rad/s, cap
+        # gelé sous yaw_follow_min_speed m/s (la direction de vitesse y est trop bruitée).
+        assert not yaw_follow or (no_yaw and action_mode == 'velocity'), 'yaw_follow suppose no_yaw et action_mode=velocity'
+        self.yaw_follow = yaw_follow
+        # building : "chain" (historique : pièces alignées en chaîne) ou "house" (house_generator : maison à portes multiples,
+        # entrée par une fenêtre ; house_level = 1..4, ou (min, max) tiré au hasard à chaque bâtiment).
+        assert building in ("chain", "house"), building
+        self.building = building
+        self.house_level = house_level
+        self.yaw_follow_rate = yaw_follow_rate
+        self.yaw_follow_min_speed = yaw_follow_min_speed
+        self.yaw_follow_offset = yaw_follow_offset   # -90 deg : le côté ORANGE du drone (axe +y du corps) est l'avant visuel
         self._yaw_target = 0.0
         self.n_act = 2 if no_yaw else (3 if fixed_altitude else 4)
 
@@ -269,6 +286,27 @@ class ExplorerEnv(gym.Env):
         # Frottement de l'air LINÉAIRE (1/s) : force = -masse * drag * vitesse. À 0 le drone glisse comme sur de la
         # glace dès qu'il se redresse ; un vrai drone freine tout seul (de l'ordre de 0,2 à 0,5 1/s).
         self.drag = drag
+        # Pénalité de JITTER : coeff * somme des (changement d'action entre deux steps)^2. Punit surtout les gros
+        # retournements brusques (de +1 à -1 d'un coup) sans gêner les petits ajustements. 0 = désactivée.
+        # Pénalité de BASCULEMENT PHYSIQUE : coeff * ((variation de roulis)^2 + (variation de tangage)^2) par step, en radians.
+        # Contrairement à la pénalité sur l'action échantillonnée (qui punissait le bruit d'exploration et poussait le réseau à
+        # mourir), le drone filtre déjà ce bruit : mesuré, 4,0 par épisode en échantillonné contre 3,5 en déterministe.
+        self.coeff_tilt_rate = coeff_tilt_rate
+        # Rampe de consigne de vitesse (comme un vrai contrôleur de vol, ex. "velocity smoothing" de PX4) : la consigne vue par la
+        # boucle de vitesse ne peut pas changer de plus de ref_accel_limit (m/s^2) * dt par step. Garde l'erreur de vitesse petite, donc
+        # l'inclinaison proportionnelle au lieu de saturée. Agit DANS le contrôleur, pas sur le signal du réseau. 0 = désactivée.
+        self.ref_accel_limit = ref_accel_limit
+        # Mode "direct" (cf. _outer_direct_loop) : constante de temps (s) et accélération maximale (m/s^2) du suivi de vitesse.
+        self.direct_tau = direct_tau
+        # Zone morte (comme sur une télécommande) : toute sortie du réseau dont la valeur absolue est sous ce seuil est ramenée à 0, le reste
+        # est re-étalé sur [0, 1]. Neutralise aussi le bruit d'exploration dans la zone. 0 = désactivée.
+        self.action_deadzone = action_deadzone
+        self.direct_a_max = direct_a_max
+        self._direct_vdes = np.zeros(2)
+        self._v_ref = np.zeros(2)
+        self._prev_rp = np.zeros(2)
+        self.coeff_action_rate = coeff_action_rate
+        self._prev_raw = None
 
         self.task = task
 
@@ -292,6 +330,8 @@ class ExplorerEnv(gym.Env):
             "last_action": spaces.Box(low=-1.0, high=1.0, shape=(self.n_act,), dtype=np.float32),
             # vitesse du drone dans SON repère : (vx, vy, vitesse de lacet) — le strict minimum
             "velocity": spaces.Box(low=-50.0, high=50.0, shape=(3,), dtype=np.float32),
+            # consigne de vitesse réellement suivie par le contrôleur (rampe), dans le repère du drone, en fraction de max_speed
+            "v_ref": spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
         }
         self.observation_space = spaces.Dict({k: all_spaces[k] for k in self.obs_keys})
 
@@ -345,15 +385,20 @@ class ExplorerEnv(gym.Env):
 
     def _build_xml(self):
 
-        self.layout = generate_layout(n_rooms=self.n_rooms, rng=self._rng, courtyard=self.start_outside)
-
-        building_xml = generate_building_xml(self.layout)
+        if self.building == "house":
+            self.layout = generate_house(self.house_level, rng=self._rng)
+            building_xml = generate_house_xml(self.layout)
+        else:
+            self.layout = generate_layout(n_rooms=self.n_rooms, rng=self._rng, courtyard=self.start_outside)
+            building_xml = generate_building_xml(self.layout)
 
 
 
         room0 = self.layout.rooms[0]
 
-        if self.layout.courtyard is not None:   # départ dans le porche, devant le bâtiment
+        if self.building == "house":
+            spawn_x, spawn_y = self.layout.spawn_xy   # centre de la cour, devant la fenêtre
+        elif self.layout.courtyard is not None:   # départ dans le porche, devant le bâtiment
             cx0, cx1, cy0, cy1 = self.layout.courtyard
             spawn_x, spawn_y = (cx0 + cx1) / 2, (cy0 + cy1) / 2
         else:
@@ -438,6 +483,9 @@ class ExplorerEnv(gym.Env):
         self._prev_p = self._prev_q = 0.0
 
         self._last_action = np.zeros(self.n_act, dtype=np.float32)
+        self._prev_raw = None
+        self._prev_rp = np.zeros(2)
+        self._v_ref = np.zeros(2)
 
 
 
@@ -448,7 +496,8 @@ class ExplorerEnv(gym.Env):
 
         self.grid.set_reachable_mask(compute_navigable_rects(self.layout))
 
-        self._corridor_rects = compute_navigable_rects(self.layout)[len(self.layout.rooms):]
+        self._corridor_rects = (self.layout.corridor_rects if self.building == "house"
+                                else compute_navigable_rects(self.layout)[len(self.layout.rooms):])
 
         self._step_count = 0
 
@@ -470,6 +519,11 @@ class ExplorerEnv(gym.Env):
 
 
 
+    def _obs_yaw(self):
+        """Cap utilisé pour tout ce que VOIT ou COMMANDE le réseau (repère des actions, rayons, frontières, crop).
+        Avec yaw_follow le réseau reste dans le repère du monde (cap 0), quel que soit le cap physique du drone."""
+        return 0.0 if self.yaw_follow else _quat_to_yaw(self.data.body("drone_body").xquat)
+
     def _outer_velocity_loop(self, target):
         """Boucle externe (UNE fois par action RL, ~50Hz) : consigne de vitesse en repère du corps
         -> roll/pitch cibles, poussée de base (avant compensation d'inclinaison), vitesse de lacet.
@@ -480,8 +534,17 @@ class ExplorerEnv(gym.Env):
         vel_lin = self.data.qvel[0:3]
         dt = self._dt_sub * self.substeps
 
-        world_vx_des = vx_body_des * np.cos(yaw) - vy_body_des * np.sin(yaw)
-        world_vy_des = vx_body_des * np.sin(yaw) + vy_body_des * np.cos(yaw)
+        frame = self._obs_yaw()
+        world_vx_des = vx_body_des * np.cos(frame) - vy_body_des * np.sin(frame)
+        world_vy_des = vx_body_des * np.sin(frame) + vy_body_des * np.cos(frame)
+        if self.ref_accel_limit > 0.0:
+            delta = np.array([world_vx_des, world_vy_des]) - self._v_ref
+            n = float(np.linalg.norm(delta))
+            lim = self.ref_accel_limit * dt
+            if n > lim:
+                delta *= lim / n
+            self._v_ref = self._v_ref + delta
+            world_vx_des, world_vy_des = float(self._v_ref[0]), float(self._v_ref[1])
         err_vx = world_vx_des - vel_lin[0]
         err_vy = world_vy_des - vel_lin[1]
         self._int_vx = np.clip(self._int_vx + err_vx * dt, -self._int_vel_max, self._int_vel_max)
@@ -523,6 +586,22 @@ class ExplorerEnv(gym.Env):
         thrust_base = self._hover_thrust_ctrl + self.kp_alt * err_vz + self.ki_alt * self._int_vz
         return roll_des, pitch_des, thrust_base, yaw_rate_des
 
+    def _outer_direct_loop(self, target, vz_des, yaw_rate_des):
+        """Mode 'direct' : la vitesse horizontale suit la consigne presque instantanément (constante de temps direct_tau, accélération
+        plafonnée à direct_a_max) grâce à une force horizontale appliquée au drone (comme une poussée "magique"), SANS passer par
+        l'inclinaison. Le drone reste à plat, comme un DJI en mode cinéma ; les boucles internes tiennent toujours l'attitude, l'altitude
+        et le cap. Irréaliste physiquement, mais supprime le retard ordre -> mouvement."""
+        yaw = _quat_to_yaw(self.data.body("drone_body").xquat)
+        vx_b, vy_b = target[0], target[1]
+        self._direct_vdes = np.array([vx_b * np.cos(yaw) - vy_b * np.sin(yaw),
+                                      vx_b * np.sin(yaw) + vy_b * np.cos(yaw)])
+        vel_lin = self.data.qvel[0:3]
+        dt = self._dt_sub * self.substeps
+        err_vz = vz_des - vel_lin[2]
+        self._int_vz = np.clip(self._int_vz + err_vz * dt, -self._int_alt_max, self._int_alt_max)
+        thrust_base = self._hover_thrust_ctrl + self.kp_alt * err_vz + self.ki_alt * self._int_vz
+        return 0.0, 0.0, thrust_base, yaw_rate_des
+
     def _inner_attitude_rate_loop(self, setpoint):
         """Boucle interne (chaque sous-step, ~500Hz) : attitude cible -> taux -> couples moteur,
         poussée divisée par up_z (la poussée agit le long de l'axe Z du CORPS : sa composante
@@ -552,6 +631,12 @@ class ExplorerEnv(gym.Env):
     def step(self, action):
 
         raw = np.clip(np.array(action, dtype=np.float32), -1.0, 1.0)
+        if self.action_deadzone > 0.0:
+            dz = self.action_deadzone
+            raw = np.where(np.abs(raw) < dz, 0.0, np.sign(raw) * (np.abs(raw) - dz) / (1.0 - dz)).astype(np.float32)
+        prev_raw = self._prev_raw if self._prev_raw is not None else np.zeros_like(raw)
+        rate_penalty = self.coeff_action_rate * float(np.sum((raw - prev_raw) ** 2))
+        self._prev_raw = raw.copy()
 
         # Lissage exponentiel de l'action brute PPO (alpha=1 -> pas de lissage) : la consigne de
         # vitesse ne saute plus d'un step à l'autre sous l'effet du bruit d'exploration gaussien.
@@ -571,6 +656,12 @@ class ExplorerEnv(gym.Env):
             vz_des = float(cmd[2]) * self.max_climb_rate
             yaw_cmd = float(cmd[3])
         yaw_rate_des = yaw_cmd * self.max_yaw_rate
+        if self.yaw_follow:
+            v_now = self.data.qvel[0:2]
+            if float(np.hypot(v_now[0], v_now[1])) > self.yaw_follow_min_speed:
+                diff = (float(np.arctan2(v_now[1], v_now[0])) + self.yaw_follow_offset - self._yaw_target + np.pi) % (2 * np.pi) - np.pi
+                max_d = self.yaw_follow_rate * self._dt_sub * self.substeps
+                self._yaw_target = (self._yaw_target + float(np.clip(diff, -max_d, max_d)) + np.pi) % (2 * np.pi) - np.pi
         if self.no_yaw:
             # Maintien de cap : la cascade ne régule que la VITESSE de rotation, donc sans correction
             # d'angle le cap dérive (jusqu'à -18 deg mesuré). P sur l'angle -> consigne de vitesse de lacet.
@@ -581,11 +672,22 @@ class ExplorerEnv(gym.Env):
         if self.action_mode == "accel":
             cxy = cmd[:2] / max(1.0, float(np.linalg.norm(cmd[:2])))
             setpoint = self._outer_accel_loop(cxy, vz_des, yaw_rate_des)
+        elif self.action_mode == "direct":
+            setpoint = self._outer_direct_loop(target, vz_des, yaw_rate_des)
         else:
             setpoint = self._outer_velocity_loop(target)
         for _ in range(self.substeps):
-            if self.drag > 0.0:
-                self.data.xfrc_applied[self._drone_bid, 0:3] = -self._drone_mass * self.drag * self.data.qvel[0:3]
+            if self.drag > 0.0 or self.action_mode == "direct":
+                f = np.zeros(3)
+                if self.drag > 0.0:
+                    f -= self._drone_mass * self.drag * self.data.qvel[0:3]
+                if self.action_mode == "direct":
+                    a_cmd = (self._direct_vdes - self.data.qvel[0:2]) / self.direct_tau
+                    n = float(np.linalg.norm(a_cmd))
+                    if n > self.direct_a_max:
+                        a_cmd *= self.direct_a_max / n
+                    f[0:2] += self._drone_mass * a_cmd
+                self.data.xfrc_applied[self._drone_bid, 0:3] = f
             self.data.ctrl[:] = self._inner_attitude_rate_loop(setpoint)
             mujoco.mj_step(self.model, self.data)
             if self.data.ncon > 0:  # contact en cours de route : ne pas laisser un rebond l'effacer
@@ -604,6 +706,10 @@ class ExplorerEnv(gym.Env):
         quat = self.data.body("drone_body").xquat
 
         en_collision = self.data.ncon > 0
+
+        _roll_now, _pitch_now, _ = _quat_roll_pitch_upz(quat)
+        tilt_rate_penalty = self.coeff_tilt_rate * ((_roll_now - self._prev_rp[0]) ** 2 + (_pitch_now - self._prev_rp[1]) ** 2)
+        self._prev_rp = np.array([_roll_now, _pitch_now])
 
         roll, pitch, up_z = _quat_roll_pitch_upz(quat)
 
@@ -691,6 +797,10 @@ class ExplorerEnv(gym.Env):
             # Coût de durée : sans lui, rester en vie sans explorer ne coûte rien (alors que traverser
             # une porte risque la mort) -> optimum local "je reste dans la pièce" (cf. journal, v2.x).
             reward -= self.time_penalty
+
+            reward -= rate_penalty
+
+            reward -= tilt_rate_penalty
 
             if self.coeff_spin > 0.0:
 
@@ -807,7 +917,7 @@ class ExplorerEnv(gym.Env):
 
         quat = self.data.body("drone_body").xquat
 
-        yaw = _quat_to_yaw(quat)
+        yaw = self._obs_yaw()
 
 
 
@@ -931,7 +1041,7 @@ class ExplorerEnv(gym.Env):
 
 
 
-        yaw = _quat_to_yaw(quat)
+        yaw = self._obs_yaw()
         if "local_crop" not in self.obs_keys:
             local_crop = np.zeros((1,), dtype=np.float32)  # non utilisé : on évite le calcul du crop
         elif self.ego_crop:
@@ -998,7 +1108,9 @@ class ExplorerEnv(gym.Env):
             "proximity_rays": proximity_rays,
             "last_action": (self._last_action.copy() if self.use_last_action
                             else np.zeros(self.n_act, dtype=np.float32)),
-            "velocity": np.array([vel_body[0], vel_body[1], vel_ang[2]], dtype=np.float32),
+            "velocity": np.array([vel_body[0], vel_body[1], 0.0 if self.yaw_follow else vel_ang[2]], dtype=np.float32),  # yaw_follow : le réseau ne voit pas le nez tourner
+            "v_ref": np.clip(np.array([c * self._v_ref[0] + s_ * self._v_ref[1], -s_ * self._v_ref[0] + c * self._v_ref[1]],
+                                      dtype=np.float32) / max(self.max_speed, 1e-6), -1.0, 1.0),
         }
         return {k: full[k] for k in self.obs_keys}
 

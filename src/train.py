@@ -93,6 +93,7 @@ def main():
             stream.reconfigure(errors="replace")
 
     from stable_baselines3 import PPO
+    from caps_ppo import PPOCaps
 
     from stable_baselines3.common.vec_env import VecNormalize
 
@@ -280,7 +281,7 @@ def main():
     parser.add_argument("--n-rooms-min", type=int, default=3)
     parser.add_argument("--n-rooms-max", type=int, default=3,
                         help="Nombre de pièces tiré entre min et max (défaut 3-3 : on commence direct à 3 pièces).")
-    parser.add_argument("--action-mode", choices=["velocity", "accel"], default="velocity",
+    parser.add_argument("--action-mode", choices=["velocity", "accel", "direct"], default="velocity",
                         help="velocity = la sortie du réseau est une consigne de vitesse (historique) ; "
                              "accel = une accélération/inclinaison directe, avec frottement virtuel qui plafonne à --max-speed.")
     parser.add_argument("--start-inside", action="store_true",
@@ -289,8 +290,34 @@ def main():
     parser.add_argument("--drag", type=float, default=0.0,
                         help="Frottement de l'air linéaire (1/s) : le drone freine tout seul au lieu de glisser. "
                              "0 = aucun (historique), 0,2 à 0,5 = réaliste.")
+    parser.add_argument("--action-deadzone", type=float, default=0.0,
+                        help="Zone morte sur les sorties du réseau (0,1 à 0,3 conseillé) : sous ce seuil la sortie vaut 0. Coupe les petites "
+                             "oscillations et le bruit d'exploration. 0 = désactivée.")
+    parser.add_argument("--direct-tau", type=float, default=0.15,
+                        help="Mode --action-mode direct : constante de temps (s) du suivi de vitesse (plus petit = plus instantané).")
+    parser.add_argument("--direct-a-max", type=float, default=12.0,
+                        help="Mode --action-mode direct : accélération horizontale maximale (m/s^2), freinages compris.")
+    parser.add_argument("--caps-lambda", type=float, default=1.0,
+                        help="CAPS (Mysore et al., ICRA 2021), terme temporel : poids de la perte ||mu(s_t) - mu(s_t+1)||^2 sur l'action MOYENNE "
+                             "de la politique (jamais l'action échantillonnée), ajoutée à la perte de PPO. Lisse le pilotage sans toucher au "
+                             "reward. 1.0 par défaut (validé : 100 %% de victoires sur 2 seeds) ; 0 = PPO standard.")
+    parser.add_argument("--ref-accel-limit", type=float, default=0.0,
+                        help="Rampe de consigne de vitesse (m/s^2) dans le contrôleur : la consigne ne peut pas sauter, elle monte avec cette "
+                             "accélération maximale (3 à 5 conseillé). Garde l'inclinaison proportionnelle au lieu de saturée. 0 = désactivée.")
+    parser.add_argument("--coeff-tilt-rate", type=float, default=0.0,
+                        help="Pénalité de basculement physique : coeff * (variation de roulis^2 + de tangage^2) par step, "
+                             "en radians. Calme les à-coups d'inclinaison sans punir le bruit d'exploration (5 à 10 testés). 0 = désactivée.")
+    parser.add_argument("--coeff-action-rate", type=float, default=0.0,
+                        help="Pénalité de jitter : coeff * (changement d'action entre deux steps)^2, somme sur les 2 sorties. "
+                             "Décourage les retournements brusques (de +1 à -1 d'un coup). 0 = désactivée.")
     parser.add_argument("--no-yaw", action="store_true",
                         help="2 sorties (vx, vy), pas de lacet (suppose l'altitude bloquée).")
+    parser.add_argument("--building", choices=["chain", "house"], default="chain",
+                        help="chain = pièces alignées (historique) ; house = maison à portes multiples, entrée par une fenêtre (house_generator).")
+    parser.add_argument("--house-level", type=int, nargs="+", default=[2],
+                        help="Niveau 1-4 des maisons ; deux valeurs (min max) = niveau tiré au hasard à chaque bâtiment.")
+    parser.add_argument("--yaw-follow", action="store_true",
+                        help="Le nez du drone suit sa direction de déplacement (réalisme) ; le réseau reste dans le repère du monde. Suppose --no-yaw.")
     parser.add_argument("--no-last-action", action="store_true",
                         help="Met l'observation last_action à zéro (ablation).")
     parser.add_argument("--gamma", type=float, default=0.99, help="Facteur d'actualisation PPO.")
@@ -454,7 +481,7 @@ def main():
             substeps=args.substeps, ego_crop=not args.no_ego_crop,
             use_last_action=not args.no_last_action, time_penalty=args.time_penalty,
             obs_keys=args.obs_keys, fixed_altitude=not args.free_altitude, k_frontiers=args.k_frontiers,
-            no_yaw=args.no_yaw, action_mode=args.action_mode, start_outside=not args.start_inside, drag=args.drag,
+            no_yaw=args.no_yaw, action_mode=args.action_mode, start_outside=not args.start_inside, drag=args.drag, coeff_action_rate=args.coeff_action_rate, coeff_tilt_rate=args.coeff_tilt_rate, ref_accel_limit=args.ref_accel_limit, direct_tau=args.direct_tau, direct_a_max=args.direct_a_max, action_deadzone=args.action_deadzone, yaw_follow=args.yaw_follow, building=args.building, house_level=(args.house_level[0] if len(args.house_level) == 1 else tuple(args.house_level)),
             n_rooms=(args.n_rooms_min, args.n_rooms_max),
 
         )
@@ -507,7 +534,7 @@ def main():
             substeps=args.substeps, ego_crop=not args.no_ego_crop,
             use_last_action=not args.no_last_action, time_penalty=args.time_penalty,
             obs_keys=args.obs_keys, fixed_altitude=not args.free_altitude, k_frontiers=args.k_frontiers,
-            no_yaw=args.no_yaw, action_mode=args.action_mode, start_outside=not args.start_inside, drag=args.drag,
+            no_yaw=args.no_yaw, action_mode=args.action_mode, start_outside=not args.start_inside, drag=args.drag, coeff_action_rate=args.coeff_action_rate, coeff_tilt_rate=args.coeff_tilt_rate, ref_accel_limit=args.ref_accel_limit, direct_tau=args.direct_tau, direct_a_max=args.direct_a_max, action_deadzone=args.action_deadzone, yaw_follow=args.yaw_follow, building=args.building, house_level=(args.house_level[0] if len(args.house_level) == 1 else tuple(args.house_level)),
             n_rooms=(args.n_rooms_min, args.n_rooms_max),
 
         )
@@ -534,7 +561,8 @@ def main():
 
         )
 
-        model = PPO("MultiInputPolicy", env, policy_kwargs=policy_kwargs,
+        caps_kw = {"caps_lambda": args.caps_lambda} if args.caps_lambda > 0 else {}
+        model = (PPOCaps if args.caps_lambda > 0 else PPO)("MultiInputPolicy", env, policy_kwargs=policy_kwargs, **caps_kw,
 
                      n_steps=args.n_steps, batch_size=args.batch_size,
 

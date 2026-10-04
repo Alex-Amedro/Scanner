@@ -1207,6 +1207,84 @@ leurs résultats 83 %/86,1 % et 97 %/90,1 % doivent rester identiques à la déc
 consignés plus haut) : accel_s43, agile, cnn1, ctrl6_s2, goal2_d50, out_full_s42, out_full_s43, out_min_s42, rep42, spd45_s42, spd45_s43,
 tilt25_s42, tilt25_s43, leurs courbes tensorboard, et `src/eval_logs/`.
 
+**Adoucir le mouvement (contrôleur réglé, départ extérieur, 3 pièces, 30 épisodes, seeds 42 / 43)** — constat : le drone est quasi toujours à fond
+d'inclinaison (34-36 deg en moyenne, 49-50 deg pour 95 % des pas, bascule jusqu'à 590 deg/s au 95e centile, 2 090 deg/s au max ; 31 % des sorties
+à ±1 ; l'ordre change de plus de 3 m/s en un step dans 11 % des cas, max 12 m/s) car `kp_vel=4` sature l'inclinaison dès 1,7 m/s d'erreur.
+| Variante | victoire s42 / s43 | vitesse moy. (s42 / s43) | inclinaison moy., p95 (s42 / s43) |
+|---|---|---|---|
+| référence (kp_vel 4, tilt 35, kp_att 20) | 97 % / 87 % | 4,2 / 3,5 m/s | 34° p95 49° / 36° p95 50° |
+| `--kp-vel 2` | 70 % / 83 % | 3,7 / 4,1 | 29° p95 46° / 26° p95 44° |
+| **`--max-tilt-angle-deg 28`** | **93 % / 83 %** | 3,8 / 2,8 | **30° p95 40° / 26° p95 40°** |
+| `--kp-att 10` | 43 % / 77 % | 3,2 / 3,6 | 34° p95 48° / 32° p95 48° |
+Lecture : `kp_att 10` (basculement plus lent) dégrade nettement et n'adoucit rien -> écarté ; `kp_vel 2` adoucit mais coûte du succès sur le seed 42 ;
+**plafond à 28°** = meilleur compromis (inclinaison p95 49->40°, succès conservé). Les courbes d'apprentissage des deux seeds se chevauchent désormais
+(le contrôleur réglé a supprimé la « loterie des seeds »). Pénalité de jitter (`--coeff-action-rate`, carré du changement d'action ; 10 retournements
++1/-1 = 73 points à coeff 2, 221 à coeff 6, une action constante = 0) et retest de la carte (CNN) lancés ensuite (résultats ci-dessous).
+
+**Pénalité de jitter (`--coeff-action-rate`, carré du changement d'action échantillonnée) : ÉCHEC** (`jit2_s42` : 0 % victoire, 100 % mort, couverture 57 %).
+Cause : elle punit le changement d'action ÉCHANTILLONNÉE, donc le bruit d'exploration de PPO suffit à la déclencher (changement^2 moyen ~2,06 par step à
+sigma=1, 1,47 à 0,7, 0,62 à 0,4 -> 825 points par épisode de 200 steps au coefficient 2, contre 50 pour une mort) : le réseau apprend à MOURIR tout de
+suite pour ne plus payer. Le coefficient 6 n'a pas été lancé (pire). L'option reste dans le code (défaut 0) ; une version correcte devrait pénaliser une
+grandeur PHYSIQUE (vitesse de basculement du drone, variation d'accélération réelle), filtrée par le drone, ou baisser le bruit d'exploration.
+**Carte (CNN `local_crop`) avec le contrôleur réglé** (`map_s42`, 350k, seed 42) : **50 % victoire / 50 % mort, couverture 79 %**, 3,7 m/s, 244 steps/victoire,
+contre 97 % pour la même config sans carte : la carte dégrade encore (comme en ancien contrôleur : 10 %, 17 %). 12 288 valeurs d'entrée de plus à ce budget,
+et ces bâtiments (3 pièces alignées) n'ont pas besoin de mémoire. Elle servira surtout sur des cartes à branches ; à retester là, éventuellement avec un
+crop plus petit.
+
+### Mouvement « présentable » (4-5 octobre) : pénalité de basculement, rampe de consigne, mode direct, slalom
+
+Retour utilisateur : plant/tilt28/kp2 se ressemblent à l'oeil, tous « bien mais pas montrables » ; le drone passe de pleine droite à pleine gauche en
+quelques ms ; il SLALOME dans l'axe orthogonal quand il va droit ; idées : rampe façon DJI (mais « il faudrait lui donner l'info temporelle »),
+zone morte, inclinaison seulement visuelle, drone plus instantané.
+| Essai (contrôleur réglé, 350k, seeds 42 / 43) | victoire | mesure clé | verdict |
+|---|---|---|---|
+| pénalité de basculement PHYSIQUE `--coeff-tilt-rate 5` | 67 % / 80 % | inclinaison moy. 36° (inchangée), basculement p95 449-529°/s | inutile (10 non lancé) |
+| rampe de consigne `--ref-accel-limit 5` (seed 42 seul) | **0 %** | vol très doux (incl. moy. 19°, p95 27°, basculement p95 113°/s) | l'apprentissage s'effondre : retard + consigne cachée (intuition de l'utilisateur) ; autres seeds arrêtés |
+| mode direct `--action-mode direct` (tau 0,15 s, 12 m/s²) | 97 % / 87 % | 0 mort (s42), ordre p95 3,65-3,99 m/s, drone à PLAT (0°) | marche mais irréaliste (« pas montrable ») |
+| mode direct plus sec (tau 0,08 s, 20 m/s²) | 90 % / 93 % | vitesse moy. 4,9 / 3,2 m/s, ordre p95 4,4 m/s | idem, ordres plus brusques |
+Mode direct (`_outer_direct_loop`) : force horizontale appliquée au drone qui suit la consigne en tau, accélération plafonnée, attitude tenue à plat ;
+mesuré sans murs : 90 % de 6 m/s en 0,52 s (0,88 s en mode vitesse), freinage depuis 6 m/s en 1,6 m (3,07 m), 0° d'inclinaison.
+**Slalom mesuré** (fenêtres de 1 s à > 3 m/s dans un axe, autre axe) : `plant_s42` vitesse orthogonale écart-type 0,77 m/s, déviation 0,51 m, ~2,6
+passages par zéro/s, écart-type de la COMMANDE 0,40 ; `tilt28_s42` 0,64 m/s, 0,52 m ; `direct_s42` **1,19 m/s**, 0,70 m. Le slalom vient des
+COMMANDES du réseau (~1,2 Hz, ±2,4 m/s), pas de la physique : un drone plus instantané slalome PLUS. Hypothèse : recentrage latéral à fort gain dans
+les couloirs de 1,6 m.
+Options ajoutées (toutes désactivées par défaut) : `--coeff-action-rate` (ÉCHEC : punit le bruit d'exploration), `--coeff-tilt-rate`, `--ref-accel-limit`,
+`--action-mode direct` (`--direct-tau`, `--direct-a-max`), `--action-deadzone`, observation `v_ref`, `--drag`. Batterie suivante (6 runs) : `last_action` en
+entrée, zone morte 0,2, rampe 5 + `v_ref` en entrée.
+
+## POINT DU 5 OCTOBRE — où on en est (à lire en premier)
+
+**Meilleure configuration : CAPS (poids 1,0)** — `train.py` la prend maintenant par défaut. Commande :
+`python train.py --name X --death-penalty 50 --no-yaw --max-speed 6.0 --seed 42 --total-timesteps 350000 --device cpu --n-envs 8`
+(défauts : entrées minimales 27 nombres, 3 pièces, départ extérieur, altitude et cap verrouillés, contrôleur réglé `kp_rate 0.4 / kp_att 20 /
+kp_vel 4 / damping 0`, CAPS 1,0). Voir : `python evaluate.py --name caps1_s42 --n-episodes 3 --visual`.
+| Modèle conservé | Victoire (3 pièces, seeds 9000-9029) | Vitesse moy. | Ordre p95 (20 ms) | Ce que c'est |
+|---|---|---|---|---|
+| `caps1_s42` / `caps1_s43` | **100 % / 100 %** | 4,6 / 4,8 m/s | **1,2 m/s** | RÉFÉRENCE : CAPS temporel (lambda 1,0), 183-190 steps pour gagner, 0 collision |
+| `plant_s42` / `plant_s43` | 97 % / 87 % | 4,2 / 3,5 m/s | 4,8 m/s | même config SANS CAPS (comparaison avant/après) |
+| `ctrl6`, `accel_s42` | 83 % / 97 % | | | ancrages de NON-RÉGRESSION (revérifiés le 5 oct. : chiffres identiques) |
+| `explorer/` (v1, v3) | | | | tes versions |
+CAPS (`src/caps_ppo.py`, Mysore et al., ICRA 2021, arXiv 2012.06644) : terme de PERTE ||mu(s_t) - mu(s_t+1)||^2 sur l'action MOYENNE, ajouté à la perte de PPO
+(pas au reward : le bruit d'exploration ne le déclenche pas, la normalisation ne l'écrase pas). Poids 0,3 : 97 % / 100 %, ordre p95 1,8-2,0 m/s ; poids 1,0 :
+100 % / 100 %, ordre p95 1,2 m/s (4x moins brusque que sans CAPS), médiane 0,2 m/s (0,6 avant), écart-type de commande 0,18-0,21 (0,40 avant), vitesse PLUS élevée.
+**Généralisation de CAPS (2-4 pièces, bâtiments jamais utilisés pour choisir, seeds 9100-9129)** : `caps1_s42` **97 %** (couv. 89,5 %, 203 steps), `caps1_s43` **97 %** (89,3 %, 199 steps),
+contre 87 % / 77 % pour `plant_s42` / `plant_s43` sans CAPS. Même mode que `plant` (consigne de vitesse + PID, inclinaison max 35°, inertie réelle, ni rampe, ni zone morte, ni drag) : seule la perte d'entraînement change.
+**Ce que CAPS ne règle pas** : l'inclinaison reste forte (moy. 29-31°, p95 49-50°, basculement p95 ~400°/s contre 587) et le slalom en vitesse reste
+(écart-type orthogonal 0,68-0,75 m/s contre 0,77) bien que les commandes soient 2x plus calmes.
+**Rampe de consigne + `v_ref` en entrée** (seeds 42 / 43) : 50 % / 7 % -> trop instable d'un seed à l'autre, abandonnée (le vol le plus doux mesuré : incl. moy. 18-19°,
+basculement p95 113-120°/s, slalom 0,31 m/s, mais jamais plus de 50 %). L'état caché était bien la cause du 0 % initial (50 % avec `v_ref`).
+**Abandonné (mesuré)** : récompense de progression, pénalité de jitter sur l'action échantillonnée (le bruit d'exploration suffit à la déclencher), pénalité de
+basculement physique, lissage EMA, `kp_vel 2`, `kp_att 10`, `last_action` en entrée (80 % / 80 %), zone morte 0,2 (83 % / 77 %, effet instable), carte CNN (50 %, 10-17 %
+avec l'ancien contrôleur), rampe sans `v_ref` (0 %), `max_speed` réduit (échec x3), mode accélération (calme mais lent), mode direct (97 %/87 %, 90 %/93 % : marche mais drone à plat
+donc irréaliste). Plafond d'inclinaison 28° : 93 % / 83 % avant CAPS, plus doux (30°/p95 40°) : combinable avec CAPS, non testé.
+**Cause racine historique** : `--damping 0.05` hérité + gains PID faibles (voir « DÉCOUVERTE »). 3 % -> 97 %.
+**Ménage du 5 oct.** : modèles supprimés = tous ceux d'essais (att10, caps03, direct, direct2, dz2, kp2, lastact, map, ref5, refv, tilt28, tr5) et les logs temporaires ;
+scripts de mesure rangés dans `src/probes/` (`plant_probe`, `orders_probe`, `slalom_probe`, `stuck_probe`, à lancer depuis `src/` : `python probes/plant_probe.py <modele>`) ;
+`src/step_response.py` trace les courbes des boucles de contrôle. Options de code conservées, désactivées par défaut : `--drag`, `--action-deadzone`, `--ref-accel-limit`,
+observation `v_ref`, `--action-mode accel|direct`, `--coeff-action-rate`, `--coeff-tilt-rate`.
+**Reste à faire** : (1) bâtiments plus compliqués (salles latérales, plusieurs portes, boucles, retours en arrière) ; (2) inclinaison encore trop forte -> tester CAPS + plafond 28° ;
+(3) lacet, carte de précision pour les pompiers, vidéo.
+
 ## FEUILLE DE ROUTE (v2) — objectif : une vidéo qui marche, un drone qui visite un bâtiment et produit une carte pour les pompiers
 
 **Objectif de fin** : vidéo d'un drone devant un bâtiment qui le visite seul et construit une carte utilisable ; projet fiable
@@ -1358,3 +1436,23 @@ Un seed fixé règle la reproductibilité sur une même machine, mais ne suffit 
 garantir une comparaison propre entre deux machines différentes (non-déterminisme cuDNN côté
 GPU) : privilégier la même machine pour comparer deux versions tant que possible, et le noter
 explicitement dans le journal quand ce n'est pas le cas.
+
+## Lacet réaliste (6 oct.) — option `--yaw-follow`, testée SANS réentraînement
+Le nez du drone (côté orange, axe +y du corps) tourne vers la direction de déplacement ; rotation limitée à 1,5 rad/s, cap gelé sous 0,8 m/s.
+C'est le contrôleur bas niveau qui le fait : le réseau reste dans le repère du monde (actions, rayons, frontières, crop et vitesse alignés sur les axes,
+vitesse de lacet masquée à 0), donc ses entrées sont identiques à celles du cap fixe (écart mesuré <= 0,1 hors perturbations).
+**Résultat** : `caps1_s42` et `caps1_s43` évalués avec `--yaw-follow`, seeds 9000-9029, 3 pièces : 100 % / 100 %, 90,4 % de couverture, 183-189 steps
+(identique au cap fixe). Limite : la boîte du drone n'est pas parfaitement symétrique, la collision dépend très légèrement du cap.
+Voir : `python evaluate.py --name caps1_s42 --n-episodes 3 --visual --yaw-follow`.
+
+## Générateur `house` (6 oct.) — premiers résultats
+`src/house_generator.py` : niveaux 1-4 (voir `diagnostics/buildings_level*.png` via `python render_buildings.py`), 1 200 maisons générées / 0 invalide (contrôle d'accessibilité physique de chaque pièce depuis la cour, testé en murant la fenêtre).
+**`caps1` tel quel (entraîné sur chaînes de 3 pièces), 30 maisons par niveau** : victoires 17 % / 0 % / 3 % / 0 % (niveaux 1-4), morts surtout EN PIÈCE (la fenêtre est passée sans problème).
+**Entraînement from scratch 350k steps, maisons niveaux 1-2, recette CAPS inchangée (seed 42)** — évaluation 30 maisons, niveaux 1 / 2 / 3 :
+| modèle | niv 1 | niv 2 | niv 3 |
+|---|---|---|---|
+| `house_s42` (sans carte) | 17 % (63 % morts, 20 % timeouts) | 0 % | 3 % |
+| `house_cnn_s42` (avec carte locale) | 20 % (43 % morts, 37 % timeouts) | 0 % (53 % morts, 47 % timeouts) | 3 % |
+Courbe d'apprentissage : victoire en entraînement 2-20 %, non monotone, aucun décollage en 350k steps (les chaînes de 3 pièces décollaient dans la même durée).
+Avec la carte les morts baissent (43-53 % contre 63-100 %) mais les timeouts montent : il tourne en rond au lieu de mourir. Un seul run par modèle : indicatif, pas une preuve.
+Runs sans surveillance RAM (psutil absent à ce moment-là) mais à 8 envs et 352 256 steps : valides.

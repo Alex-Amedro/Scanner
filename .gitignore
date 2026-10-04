@@ -231,3 +231,8 @@ experiments.md
 requirements_runner.txt
 src/train.py
 src/train.py
+.roadmap.md
+
+# Scripts de mesure locaux (jetables)
+src/probes/
+logs_tmp/

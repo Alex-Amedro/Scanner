@@ -33,7 +33,11 @@ Most failures were crashes inside rooms (not corridors) caused by braking or tur
 
 ## Current work
 
-Version 19 replaced direct torque control with the velocity-command + PID cascade described above. Roll and pitch now stay under 30 degrees, but the policy flew slowly and indecisively. The reward and observations were designed for the old controller, so v2.0 (the second generation; v1.x is everything before) reworks them together: body-frame velocity, action smoothing, last command in the observation, and a proximity penalty. The first run with action smoothing failed (3% success). An ablation (same run, one setting changed at a time) showed the smoothing itself was the cause: without it, the velocity-command + PID controller reaches 60% success, 37% crash, 0% flipped, 80% coverage, on par with the best torque-control version while never flipping. Smoothing is now off by default. A later restart from a minimal setup (3 inputs: LiDAR proximity bins, 2 frontier vectors, velocity; 2 outputs; fixed altitude; reward = new cells + progress toward the targeted frontier, with a death penalty of -50 instead of -500 so that it is not larger than everything else after reward normalisation) reaches 63% success / 37% crash / 85% coverage on 2-4 room buildings after 360k steps, without any CNN. One seed so far.
+The drone now explores unseen 2-4 room buildings reliably, starting from outside the building. Current best setup (`caps1_s42`, `caps1_s43`): 100% success, no collision, about 4.7 m/s average speed, on 3-room buildings, trained in about 4 minutes on CPU. It uses 27 inputs (LiDAR sectors, the two nearest frontiers, its own velocity), two outputs (horizontal velocity command), a PID cascade underneath, and the plain reward (new cells, -50 on crash, +100 at 90% coverage).
+
+Three things made the difference: (1) the inner PID loops were badly tuned (an angular damping inherited from the earlier torque-control version made the drone sluggish and the policy oscillate): fixing it took success from 3% to 97%; (2) a death penalty of -500 became about -3.4 after reward normalisation while a step towards a door was worth about +0.01, so staying put was optimal: -50 fixed it; (3) CAPS, a smoothness regulariser on the policy's mean action (not on the noisy sampled action), made the commands four times smoother and the drone faster.
+
+Still open: flight style (the drone stays close to its maximum tilt), much harder buildings (side rooms, loops, forced backtracking), then a precision map for firefighters and a demo video.
 
 ## Project layout
 

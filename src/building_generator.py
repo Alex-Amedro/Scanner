@@ -125,6 +125,8 @@ def compute_navigable_rects(layout):
     dimensionné sur la pièce la plus large ; les pièces plus étroites
     laissent donc des bandes d'espace mort sur les côtés (ni libres, ni
     occupées, jamais atteignables) — on les exclut du calcul de couverture."""
+    if hasattr(layout, "navigable_rects"):   # bâtiment « house » : rectangles déjà calculés
+        return layout.navigable_rects
     rects = [(r.x_min, r.x_max, r.y_min, r.y_max) for r in layout.rooms]
     gap_half = layout.corridor_width / 2
     for i in range(len(layout.rooms) - 1):
