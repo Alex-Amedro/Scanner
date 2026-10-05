@@ -152,11 +152,12 @@ class OccupancyGrid:
         neighbor_unknown[:, :-1] |= unknown_mask[:, 1:]
         return free_mask & neighbor_unknown
 
-    def frontier_clusters(self, min_cluster_size=2):
+    def frontier_clusters(self, min_cluster_size=2, mask=None):
         """Regroupe les cellules-frontières en composantes connexes (flood-fill
         itératif, pas de récursion pour éviter tout risque de RecursionError
         sur une grande grille)."""
-        mask = self.frontier_cells()
+        if mask is None:
+            mask = self.frontier_cells()
         visited = np.zeros_like(mask)
         clusters = []
         h, w = mask.shape
@@ -220,6 +221,79 @@ class OccupancyGrid:
                            "size": 0, "valid": 0.0})
         return top_k
 
+    def frontier_features_bfs(self, drone_x, drone_y, drone_yaw, k=2, clearance_m=0.30, lookahead_cells=7,
+                              dist_scale_m=30.0, info_radius_cells=4):
+        """Comme frontier_features, mais les frontières sont classées par DISTANCE DE CHEMIN (à travers les cases libres connues de la
+        carte du drone), pas à vol d'oiseau, et l'angle donné est celui du PREMIER PAS (point du chemin à ~lookahead_cells cases), pas la
+        direction à vol d'oiseau, qui traverse souvent un mur. Ce n'est PAS un planificateur : le réseau garde le contrôle, l'évitement et le
+        choix entre frontières ; il reçoit seulement une mesure plus fidèle.
+        - La propagation (BFS 8-connexe, multi-sources = toutes les cases-frontières) ne traverse que des cases libres éloignées d'au moins
+          clearance_m de tout mur : le chemin indiqué ne rase pas les murs. Autour du drone la contrainte est levée (il peut être près d'un mur).
+        - Distances approximatives (distance en cases, +-20 %). Une 2e frontière = la plus proche d'un AUTRE paquet que la 1re.
+        Même format de sortie que frontier_features (distance_norm = chemin / dist_scale_m)."""
+        H, W = self.height, self.width
+        fmask = self.frontier_cells()
+        clusters = self.frontier_clusters(mask=fmask)
+        padding = {"distance_norm": 1.0, "angle_norm": 0.0, "info_gain_norm": 0.0, "world_xy": None, "size": 0, "valid": 0.0}
+        if not clusters:
+            return [dict(padding) for _ in range(k)]
+        lab = np.zeros((H, W), dtype=np.int32)
+        for i, cells in enumerate(clusters):
+            arr = np.asarray(cells)
+            lab[arr[:, 1], arr[:, 0]] = i + 1
+        r = max(0, int(round(clearance_m / self.resolution)))
+        blocked = _dilate8(self.grid == OCCUPIED, r)
+        trav = (self.grid == FREE) & ~blocked
+        dcx, dcy = self.world_to_cell(drone_x, drone_y)
+        if not self.in_bounds(dcx, dcy):
+            return [dict(padding) for _ in range(k)]
+        ya, yb, xa, xb = max(0, dcy - r - 1), min(H, dcy + r + 2), max(0, dcx - r - 1), min(W, dcx + r + 2)
+        trav[ya:yb, xa:xb] |= (self.grid[ya:yb, xa:xb] == FREE)   # le drone peut être près d'un mur
+        diag = (-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)
+        max_info = (2 * info_radius_cells + 1) ** 2
+        out, used = [], 0
+        for _ in range(k):
+            sources = fmask & (lab > 0) & ((lab != used) if used else True)
+            feat = dict(padding)
+            if sources.any() and trav[dcy, dcx]:
+                dist = np.full((H, W), -1, dtype=np.int32)
+                dist[sources] = 0
+                seen = sources.copy()
+                cur = sources
+                d = 0
+                while dist[dcy, dcx] < 0:
+                    nb = _dilate8(cur, 1) & trav & ~seen
+                    if not nb.any():
+                        break
+                    d += 1
+                    dist[nb] = d
+                    seen |= nb
+                    cur = nb
+                if dist[dcy, dcx] >= 0:
+                    cx, cy, steps, waypoint = dcx, dcy, 0, None
+                    while dist[cy, cx] > 0:       # descente jusqu'à la case-frontière source
+                        best = None
+                        for dy, dx in diag:
+                            ny, nx = cy + dy, cx + dx
+                            if 0 <= ny < H and 0 <= nx < W and 0 <= dist[ny, nx] < dist[cy, cx] and (best is None or dist[ny, nx] < dist[best[0], best[1]]):
+                                best = (ny, nx)
+                        cy, cx = best
+                        steps += 1
+                        if steps == lookahead_cells:
+                            waypoint = (cx, cy)
+                    tx, ty = self.cell_to_world(cx, cy)
+                    wx, wy = self.cell_to_world(*(waypoint or (cx, cy)))
+                    ang = float(np.arctan2(wy - drone_y, wx - drone_x) - drone_yaw)
+                    ang = (ang + np.pi) % (2 * np.pi) - np.pi
+                    used = int(lab[cy, cx])
+                    y0, y1 = max(0, cy - info_radius_cells), min(H, cy + info_radius_cells + 1)
+                    x0, x1 = max(0, cx - info_radius_cells), min(W, cx + info_radius_cells + 1)
+                    feat = {"distance_norm": min(float(dist[dcy, dcx]) * self.resolution / dist_scale_m, 1.0), "angle_norm": ang / np.pi,
+                            "info_gain_norm": min(int(np.count_nonzero(self.grid[y0:y1, x0:x1] == UNKNOWN)) / max_info, 1.0),
+                            "world_xy": (tx, ty), "size": len(clusters[used - 1]), "valid": 1.0}
+            out.append(feat)
+        return out
+
     def potential(self, frontiers, beta=0.5):
         """Champ de potentiel de frontière (plan section 6) :
         Φ_i = -d̄_i + β·Γ̄_i, renormalisé, Φ(s) = max sur les frontières valides."""
@@ -229,6 +303,20 @@ class OccupancyGrid:
         phis = [(-f["distance_norm"] + beta * f["info_gain_norm"] + 1) / (beta + 1)
                 for f in valid]
         return max(phis)
+
+
+def _dilate8(m, r=1):
+    """Dilatation 8-connexe (carré (2r+1)x(2r+1)) d'un masque booléen."""
+    out = m
+    for _ in range(r):
+        a = out.copy()
+        a[1:, :] |= out[:-1, :]
+        a[:-1, :] |= out[1:, :]
+        b = a.copy()
+        b[:, 1:] |= a[:, :-1]
+        b[:, :-1] |= a[:, 1:]
+        out = b
+    return out
 
 
 def _bresenham(x0, y0, x1, y1):

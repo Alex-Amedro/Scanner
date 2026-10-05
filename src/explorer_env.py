@@ -153,7 +153,7 @@ class ExplorerEnv(gym.Env):
                  obs_keys=None, fixed_altitude=False, altitude_kp=2.0,
                  no_yaw=False, action_mode="velocity", start_outside=False, drag=0.0, coeff_action_rate=0.0, coeff_tilt_rate=0.0, ref_accel_limit=0.0, direct_tau=0.15, direct_a_max=12.0, action_deadzone=0.0,
                  yaw_follow=False, yaw_follow_rate=1.5, yaw_follow_min_speed=0.8, yaw_follow_offset=-np.pi / 2,
-                 building="chain", house_level=2, crop_cell=None,
+                 building="chain", house_level=2, crop_cell=None, frontier_mode="euclid", bfs_clearance_m=0.30,
                  stagnation_start=0, stagnation_penalty=0.1, stagnation_limit=0,
 
                  max_steps=2000, seed=None, **obsolete):
@@ -274,6 +274,9 @@ class ExplorerEnv(gym.Env):
         # entrée par une fenêtre ; house_level = 1..4, ou (min, max) tiré au hasard à chaque bâtiment).
         assert building in ("chain", "house"), building
         self.building = building
+        assert frontier_mode in ("euclid", "bfs"), frontier_mode
+        self.frontier_mode = frontier_mode       # euclid : à vol d'oiseau (historique) ; bfs : par distance de chemin sur la carte du drone
+        self.bfs_clearance_m = bfs_clearance_m   # le chemin BFS reste à au moins cette distance des murs
         self.crop_cell = crop_cell   # côté (m) d'une case du crop de carte ; None = résolution de la grille
         # Stagnation (0 = désactivé) : après `stagnation_start` pas SANS découvrir aucune case, pénalité de `stagnation_penalty`
         # par pas ; après `stagnation_limit` pas, l'épisode est interrompu (comme un timeout). Les deux bornes empêchent que
@@ -1034,9 +1037,11 @@ class ExplorerEnv(gym.Env):
 
 
 
-        self._last_frontiers = self.grid.frontier_features(
-
-            pos[0], pos[1], yaw, k=self.k_frontiers)
+        if self.frontier_mode == "bfs":
+            self._last_frontiers = self.grid.frontier_features_bfs(pos[0], pos[1], yaw, k=self.k_frontiers, clearance_m=self.bfs_clearance_m)
+        else:
+            self._last_frontiers = self.grid.frontier_features(
+                pos[0], pos[1], yaw, k=self.k_frontiers)
 
 
 

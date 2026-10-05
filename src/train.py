@@ -321,6 +321,10 @@ def main():
     parser.add_argument("--stagnation-penalty", type=float, default=0.1)
     parser.add_argument("--stagnation-limit", type=int, default=0,
                         help="Après N pas sans découvrir de case, l'épisode est interrompu (timeout).")
+    parser.add_argument("--frontier-mode", choices=["euclid", "bfs"], default="euclid",
+                        help="euclid : frontières classées à vol d'oiseau (historique) ; bfs : par distance de chemin sur la carte du drone + direction du premier pas.")
+    parser.add_argument("--bfs-clearance", type=float, default=0.30,
+                        help="Distance mini (m) aux murs du chemin BFS (évite de coller le drone aux murs).")
     parser.add_argument("--crop-cell", type=float, default=None,
                         help="Côté (m) d'une case de la carte donnée au CNN (défaut = résolution de la grille, 0.15). 0.30 : fenêtre de 19 m au lieu de 9,6 m.")
     parser.add_argument("--yaw-follow", action="store_true",
@@ -328,7 +332,6 @@ def main():
     parser.add_argument("--no-last-action", action="store_true",
                         help="Met l'observation last_action à zéro (ablation).")
     parser.add_argument("--gamma", type=float, default=0.99, help="Facteur d'actualisation PPO.")
-    parser.add_argument("--gae-lambda", type=float, default=0.95, help="Lambda de GAE (défaut SB3 = 0.95).")
     parser.add_argument("--max-climb-rate", type=float, default=2.0)
     parser.add_argument("--max-yaw-rate", type=float, default=2.0)
     parser.add_argument("--max-tilt-angle-deg", type=float, default=35.0)
@@ -489,7 +492,7 @@ def main():
             substeps=args.substeps, ego_crop=not args.no_ego_crop,
             use_last_action=not args.no_last_action, time_penalty=args.time_penalty,
             obs_keys=args.obs_keys, fixed_altitude=not args.free_altitude, k_frontiers=args.k_frontiers,
-            no_yaw=args.no_yaw, action_mode=args.action_mode, start_outside=not args.start_inside, drag=args.drag, coeff_action_rate=args.coeff_action_rate, coeff_tilt_rate=args.coeff_tilt_rate, ref_accel_limit=args.ref_accel_limit, direct_tau=args.direct_tau, direct_a_max=args.direct_a_max, action_deadzone=args.action_deadzone, yaw_follow=args.yaw_follow, crop_cell=args.crop_cell, stagnation_start=args.stagnation_start, stagnation_penalty=args.stagnation_penalty, stagnation_limit=args.stagnation_limit, building=args.building, house_level=(args.house_level[0] if len(args.house_level) == 1 else tuple(args.house_level)),
+            no_yaw=args.no_yaw, action_mode=args.action_mode, start_outside=not args.start_inside, drag=args.drag, coeff_action_rate=args.coeff_action_rate, coeff_tilt_rate=args.coeff_tilt_rate, ref_accel_limit=args.ref_accel_limit, direct_tau=args.direct_tau, direct_a_max=args.direct_a_max, action_deadzone=args.action_deadzone, yaw_follow=args.yaw_follow, crop_cell=args.crop_cell, frontier_mode=args.frontier_mode, bfs_clearance_m=args.bfs_clearance, stagnation_start=args.stagnation_start, stagnation_penalty=args.stagnation_penalty, stagnation_limit=args.stagnation_limit, building=args.building, house_level=(args.house_level[0] if len(args.house_level) == 1 else tuple(args.house_level)),
             n_rooms=(args.n_rooms_min, args.n_rooms_max),
 
         )
@@ -542,7 +545,7 @@ def main():
             substeps=args.substeps, ego_crop=not args.no_ego_crop,
             use_last_action=not args.no_last_action, time_penalty=args.time_penalty,
             obs_keys=args.obs_keys, fixed_altitude=not args.free_altitude, k_frontiers=args.k_frontiers,
-            no_yaw=args.no_yaw, action_mode=args.action_mode, start_outside=not args.start_inside, drag=args.drag, coeff_action_rate=args.coeff_action_rate, coeff_tilt_rate=args.coeff_tilt_rate, ref_accel_limit=args.ref_accel_limit, direct_tau=args.direct_tau, direct_a_max=args.direct_a_max, action_deadzone=args.action_deadzone, yaw_follow=args.yaw_follow, crop_cell=args.crop_cell, stagnation_start=args.stagnation_start, stagnation_penalty=args.stagnation_penalty, stagnation_limit=args.stagnation_limit, building=args.building, house_level=(args.house_level[0] if len(args.house_level) == 1 else tuple(args.house_level)),
+            no_yaw=args.no_yaw, action_mode=args.action_mode, start_outside=not args.start_inside, drag=args.drag, coeff_action_rate=args.coeff_action_rate, coeff_tilt_rate=args.coeff_tilt_rate, ref_accel_limit=args.ref_accel_limit, direct_tau=args.direct_tau, direct_a_max=args.direct_a_max, action_deadzone=args.action_deadzone, yaw_follow=args.yaw_follow, crop_cell=args.crop_cell, frontier_mode=args.frontier_mode, bfs_clearance_m=args.bfs_clearance, stagnation_start=args.stagnation_start, stagnation_penalty=args.stagnation_penalty, stagnation_limit=args.stagnation_limit, building=args.building, house_level=(args.house_level[0] if len(args.house_level) == 1 else tuple(args.house_level)),
             n_rooms=(args.n_rooms_min, args.n_rooms_max),
 
         )
@@ -574,7 +577,7 @@ def main():
 
                      n_steps=args.n_steps, batch_size=args.batch_size,
 
-                     seed=args.seed, device=device, gamma=args.gamma, gae_lambda=args.gae_lambda,
+                     seed=args.seed, device=device, gamma=args.gamma,
 
                      verbose=1, tensorboard_log=args.logdir)
 

@@ -132,8 +132,9 @@ def main():
                               "beaucoup de lignes).")
     parser.add_argument("--building", choices=["chain", "house"], default=None, help="Force le type de bâtiment (maison = house_generator).")
     parser.add_argument("--house-level", type=int, nargs="+", default=None, help="Niveau 1-4 (ou min max) des maisons.")
-    parser.add_argument("--yaw-follow", action="store_true",
-                        help="Force yaw_follow=True (le nez suit la direction de déplacement), même sur un modèle entraîné cap fixe.")
+    parser.add_argument("--yaw-follow", action="store_true", help="(inutile : actif par défaut quand le modèle le permet)")
+    parser.add_argument("--no-yaw-follow", action="store_true",
+                        help="Désactive le lacet réaliste (par défaut le nez suit la direction de déplacement pour les modèles à cap fixe --no-yaw).")
     parser.add_argument("--n-rooms-min", type=int, default=None,
                         help="Surcharge le nombre min de pièces (défaut : celui de l'entraînement).")
     parser.add_argument("--n-rooms-max", type=int, default=None)
@@ -170,8 +171,8 @@ def main():
         env_kwargs["building"] = args.building or "house"
         if args.house_level:
             env_kwargs["house_level"] = args.house_level[0] if len(args.house_level) == 1 else tuple(args.house_level)
-    if args.yaw_follow:
-        env_kwargs = dict(env_kwargs)
+    if not args.no_yaw_follow and env_kwargs.get("no_yaw") and env_kwargs.get("action_mode", "velocity") == "velocity":
+        env_kwargs = dict(env_kwargs)   # le réseau est aveugle au cap : mêmes entrées, rendu réaliste
         env_kwargs["yaw_follow"] = True
     if env_kwargs:
         print(f"Réglages repris de l'entraînement : {env_kwargs}")
