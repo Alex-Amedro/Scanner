@@ -153,7 +153,8 @@ class ExplorerEnv(gym.Env):
                  obs_keys=None, fixed_altitude=False, altitude_kp=2.0,
                  no_yaw=False, action_mode="velocity", start_outside=False, drag=0.0, coeff_action_rate=0.0, coeff_tilt_rate=0.0, ref_accel_limit=0.0, direct_tau=0.15, direct_a_max=12.0, action_deadzone=0.0,
                  yaw_follow=False, yaw_follow_rate=1.5, yaw_follow_min_speed=0.8, yaw_follow_offset=-np.pi / 2,
-                 building="chain", house_level=2,
+                 building="chain", house_level=2, crop_cell=None,
+                 stagnation_start=0, stagnation_penalty=0.1, stagnation_limit=0,
 
                  max_steps=2000, seed=None, **obsolete):
 
@@ -273,6 +274,14 @@ class ExplorerEnv(gym.Env):
         # entrée par une fenêtre ; house_level = 1..4, ou (min, max) tiré au hasard à chaque bâtiment).
         assert building in ("chain", "house"), building
         self.building = building
+        self.crop_cell = crop_cell   # côté (m) d'une case du crop de carte ; None = résolution de la grille
+        # Stagnation (0 = désactivé) : après `stagnation_start` pas SANS découvrir aucune case, pénalité de `stagnation_penalty`
+        # par pas ; après `stagnation_limit` pas, l'épisode est interrompu (comme un timeout). Les deux bornes empêchent que
+        # rester parqué soit gratuit SANS que la pénalité cumulée dépasse la mort : (limit - start) * penalty < death_penalty.
+        self.stagnation_start = stagnation_start
+        self.stagnation_penalty = stagnation_penalty
+        self.stagnation_limit = stagnation_limit
+        self._stag = 0
         self.house_level = house_level
         self.yaw_follow_rate = yaw_follow_rate
         self.yaw_follow_min_speed = yaw_follow_min_speed
@@ -486,7 +495,7 @@ class ExplorerEnv(gym.Env):
         self._prev_raw = None
         self._prev_rp = np.zeros(2)
         self._v_ref = np.zeros(2)
-
+        self._stag = 0
 
 
 
@@ -722,6 +731,7 @@ class ExplorerEnv(gym.Env):
         known_cells = int(np.count_nonzero((self.grid.grid != -1) & self.grid.reachable))
 
         n_new_cells = known_cells - self._last_known_cells
+        self._stag = 0 if n_new_cells > 0 else self._stag + 1
 
         self._last_known_cells = known_cells
 
@@ -798,6 +808,9 @@ class ExplorerEnv(gym.Env):
             # une porte risque la mort) -> optimum local "je reste dans la pièce" (cf. journal, v2.x).
             reward -= self.time_penalty
 
+            if self.stagnation_start > 0 and self._stag > self.stagnation_start:
+                reward -= self.stagnation_penalty
+
             reward -= rate_penalty
 
             reward -= tilt_rate_penalty
@@ -836,7 +849,7 @@ class ExplorerEnv(gym.Env):
 
 
 
-        truncated = self._step_count >= self.max_steps
+        truncated = self._step_count >= self.max_steps or (self.stagnation_limit > 0 and self._stag >= self.stagnation_limit)
 
 
 
@@ -1045,7 +1058,7 @@ class ExplorerEnv(gym.Env):
         if "local_crop" not in self.obs_keys:
             local_crop = np.zeros((1,), dtype=np.float32)  # non utilisé : on évite le calcul du crop
         elif self.ego_crop:
-            local_crop = self.grid.local_crop_onehot_ego(pos[0], pos[1], yaw, self.crop_size)
+            local_crop = self.grid.local_crop_onehot_ego(pos[0], pos[1], yaw, self.crop_size, cell=self.crop_cell)
         else:
             local_crop = self.grid.local_crop_onehot(pos[0], pos[1], self.crop_size)
 

@@ -98,14 +98,21 @@ class OccupancyGrid:
         onehot[2] = (crop == UNKNOWN)
         return onehot
 
-    def local_crop_onehot_ego(self, x, y, yaw, crop_size=64):
+    def local_crop_onehot_ego(self, x, y, yaw, crop_size=64, cell=None):
         """Crop 3 canaux centré sur (x, y) ET tourné dans le repère du corps : "haut" de l'image
         = devant le drone (axe x du corps), "gauche" de l'image = gauche du drone (axe y du
         corps). Cohérent avec frontier_vector/proximity_rays/relief_rays et avec l'action, qui
         sont tous égocentriques — le CNN n'a plus à deviner le cap pour interpréter la carte.
-        Échantillonnage au plus proche voisin ; hors grille = UNKNOWN."""
-        half = crop_size // 2
-        idx = (half - np.arange(crop_size, dtype=np.float32)) * self.resolution
+        Échantillonnage au plus proche voisin ; hors grille = UNKNOWN.
+
+        cell : côté (m) d'une case du crop. None = résolution de la grille (historique). Si cell est un multiple
+        de la résolution (ex. 0.30 pour une grille de 0.15), chaque case du crop agrège un bloc de k x k cases fines :
+        MUR dès qu'une case du bloc est un mur (un mur de 15 cm ne doit pas disparaître), libre/inconnu = proportion
+        du bloc (0 à 1). Même forme de sortie (3, crop_size, crop_size) : le CNN ne change pas, la fenêtre s'élargit."""
+        k = 1 if not cell else max(1, int(round(cell / self.resolution)))
+        n = crop_size * k
+        half = n // 2
+        idx = (half - np.arange(n, dtype=np.float32)) * self.resolution
         fwd = idx[:, None]    # ligne r  -> distance vers l'avant
         left = idx[None, :]   # colonne c -> distance vers la gauche
         cos_y, sin_y = np.cos(yaw), np.sin(yaw)
@@ -114,13 +121,23 @@ class OccupancyGrid:
         cx = np.floor((wx - self.x_min) / self.resolution).astype(np.int32)
         cy = np.floor((wy - self.y_min) / self.resolution).astype(np.int32)
         inside = (cx >= 0) & (cx < self.width) & (cy >= 0) & (cy < self.height)
-        crop = np.full((crop_size, crop_size), UNKNOWN, dtype=np.int8)
+        crop = np.full((n, n), UNKNOWN, dtype=np.int8)
         crop[inside] = self.grid[cy[inside], cx[inside]]
-        onehot = np.zeros((3, crop_size, crop_size), dtype=np.float32)
+        onehot = np.zeros((3, n, n), dtype=np.float32)
         onehot[0] = (crop == FREE)
         onehot[1] = (crop == OCCUPIED)
         onehot[2] = (crop == UNKNOWN)
-        return onehot
+        if k == 1:
+            return onehot
+        blocks = onehot.reshape(3, crop_size, k, crop_size, k)
+        out = np.empty((3, crop_size, crop_size), dtype=np.float32)
+        out[1] = blocks[1].max(axis=(1, 3))
+        out[0] = blocks[0].mean(axis=(1, 3))
+        out[2] = blocks[2].mean(axis=(1, 3))
+        wall = out[1] > 0.5
+        out[0][wall] = 0.0
+        out[2][wall] = 0.0
+        return out
 
     def frontier_cells(self):
         """Cellules libres ayant au moins un voisin inconnu ET atteignable

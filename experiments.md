@@ -1456,3 +1456,49 @@ Voir : `python evaluate.py --name caps1_s42 --n-episodes 3 --visual --yaw-follow
 Courbe d'apprentissage : victoire en entraînement 2-20 %, non monotone, aucun décollage en 350k steps (les chaînes de 3 pièces décollaient dans la même durée).
 Avec la carte les morts baissent (43-53 % contre 63-100 %) mais les timeouts montent : il tourne en rond au lieu de mourir. Un seul run par modèle : indicatif, pas une preuve.
 Runs sans surveillance RAM (psutil absent à ce moment-là) mais à 8 envs et 352 256 steps : valides.
+
+## POINT DU 5-6 OCTOBRE (soir) — PAUSE, à reprendre demain
+**Fait aujourd'hui** : `src/probes/` sorti de git (.gitignore) ; lacet réaliste `--yaw-follow` (nez côté orange vers la direction de déplacement, réseau aveugle au cap, `caps1` 100 %/100 % inchangé,
+PAS encore utilisé en entraînement) ; générateur `src/house_generator.py` niveaux 1-4 (`python render_buildings.py`, images dans `diagnostics/`) ; option `--stagnation-start/--stagnation-penalty/--stagnation-limit`
+(pénalité par pas après N pas sans case nouvelle, épisode interrompu à la limite ; bornée : (limite-début)*pénalité < mort, sinon le drone préfère mourir).
+**Diagnostic « il est perdu » (house_cnn_s42 / house_s42, niveau 1, 20 maisons)** : deux échecs. (a) MORT (50-70 %) en allant vers la frontière (mur le plus proche à 14 cm à la mort). (b) PARQUÉ (15-25 %) :
+sur les 300 derniers pas d'un timeout il bouge de 0,4-1,3 m, 95 % de pas sans gain, à 1,4 m du mur le plus proche et 4,2 m de la frontière. Récompense actuelle : +1 par case nouvelle, +100 à 90 %, -50 mort ;
+AUCUN coût de temps / immobilité / revisite -> rester parqué = 0, gratuit. La frontière « la plus proche » est en ligne droite : le chemin direct est coupé par un mur dans 77-88 % des pas des victoires et 98-99 % des
+timeouts (mesure grossière : seul l'écart compte). La carte CNN voit libre/mur/inconnu ; « inconnu derrière un mur » = « inconnu à explorer » ; avec elle les morts baissent (43-53 % contre 63-100 %), les timeouts montent.
+**Décisions de l'utilisateur** : (1) pénalité de stagnation OUI ; (2) résumé polaire de la carte NON — principe : n'utiliser que des entrées qui ont un sens physique réaliste (carte construite par le drone, capteurs) ;
+la carte CNN reste ; PAS de path finding ; (3) « plus de steps » refusé au départ car l'entraînement stagnait, MAIS : les nouveaux modèles (stagnation) étaient ENCORE EN PROGRESSION à 350k -> la référence sans pénalité
+doit aussi être entraînée plus longtemps pour comparer à durée égale (à faire demain, p. ex. 1 M de steps).
+**Expérience lancée (peut avoir fini pendant la nuit)** : maisons niveau 1, carte CNN, seeds 42 et 43 ; `h1cnn_*` (sans pénalité) contre `h1stag_*` (début 100, 0,1/pas, limite 300) ; 350k steps. Résultats dans
+`logs_tmp/stag_summary.txt` (script `logs_tmp/run_stag.sh`). Valide seulement si `exit=0`, `steps=352256` et 8 envs ; sinon relancer le run concerné seul, sans rien d'autre en parallèle. Aucun chiffre vérifié n'existe encore
+pour cette expérience : l'impression « différence significative » de l'utilisateur vient des courbes, à confirmer avec l'évaluation.
+**À faire demain, dans l'ordre** : (1) lire `logs_tmp/stag_summary.txt` ; (2) rejouer les deux modèles à durée égale et plus longue (1 M) ; (3) décider d'activer `--yaw-follow` dans les entraînements (entrées identiques) ;
+(4) niveaux 2-4 de maisons ; (5) ménage avec accord : `src/models/cnn_s42` est un run INTERROMPU par moi (invalide, à supprimer si tu es d'accord) ; `house_s42`, `house_cnn_s42` (mélange niv. 1-2, 350k) = références.
+**Réserves à garder pour le README** : le calcul des frontières utilise le masque réel du bâtiment (info privilégiée, un vrai drone ne l'a pas) ; 2 seeds x 30 maisons seulement ; tilt moyen encore ~30 deg ;
+tensorboard, matplotlib et psutil avaient disparu du Python de la machine et ont été réinstallés.
+**CORRECTION (arrêt manuel avant extinction du PC)** : le lot a été coupé. État : `h1cnn_s42` TERMINÉ (350k, exit=0, pas encore évalué) ; `h1stag_s42` INTERROMPU à ~221k steps (INVALIDE, à refaire en entier) ; `h1cnn_s43` et `h1stag_s43` jamais lancés ; aucune évaluation faite.
+Donc aucun résultat exploitable sur la pénalité de stagnation : tout est à relancer demain (`logs_tmp/run_stag.sh`, ou mieux, directement à 1 M de steps pour comparer à durée égale).
+
+## 6 octobre — pénalité de stagnation et lecture de la carte (maisons niveau 1, carte CNN, seed 42, 350k steps)
+(`h1stag_s42` du lot précédent est INVALIDE ; refait sous le nom `h1stag2_s42`, exit=0, 352 256 steps, 8 envs.) Évaluation 30 maisons, seeds 9000-9029 :
+| modèle | victoire | mort | timeout | couverture |
+|---|---|---|---|---|
+| `h1cnn_s42` (sans pénalité) | 27 % | 10 % | 63 % | 77,2 % |
+| `h1stag2_s42` (début 100, 0,1/pas, limite 300) | 13 % | 17 % | 70 % | 73,6 % |
+Courbes d'entraînement (dernier quart) : victoire 25 % contre 27 % -> mêmes courbes ; la pénalité convertit des morts (67 % -> 41 %) en timeouts (9 % -> 32 %) sans augmenter les victoires. 1 seed, 30 maisons :
+pas de différence démontrable (si quelque chose, pas mieux). Les DEUX courbes montent encore à 350k (victoire 11 -> 18 -> 25 %).
+**Comportement** (20 maisons) : les timeouts sont des drones PARQUÉS (vitesse moyenne 0,5 m/s, 95 % de pas sans gain, étendue des 300 derniers pas 0,3-0,5 m, à ~1 m du mur et 2,6-3,3 m de la frontière) ;
+la frontière la plus proche est derrière un mur dans 90-99 % des pas. Même avec -20 de pénalité cumulée le drone préfère rester parqué que risquer -50 : la récompense seule ne suffit pas.
+**La carte est-elle utilisée ? (`h1cnn_s42`, 20 maisons, carte altérée à l'évaluation)** : normale 35 % de victoires / 15 % morts ; carte VIDE 0 % / 100 % morts (couverture 19 %) ; carte GELÉE au pas 0 : 10 % / 90 % morts ;
+carte réduite aux 2 m autour du drone : 0 % / 100 % morts. Donc le réseau DÉPEND de la carte, y compris loin du drone. Réserve : une carte altérée est une entrée jamais vue à l'entraînement, ça prouve l'usage, pas la compréhension.
+
+## 7 octobre — carte à grosses cases (500k steps, maisons niveau 1, seed 42, durée égale)
+Ajout : `--crop-cell 0.30` (le CNN reçoit toujours 64x64, chaque case agrège un bloc 2x2 : mur dès qu'un mur touche la case ; fenêtre 19 m au lieu de 9,6 m).
+`h1base500_s42` (= h1cnn_s42 prolongé : mêmes 350 premiers k steps IDENTIQUES au chiffre près, déterminisme) et `h1coarse500_s42` : exit=0, 507 904 steps, 8 envs.
+| 30 maisons | victoire | mort | timeout | couverture |
+|---|---|---|---|---|
+| `h1base500_s42` | 23 % | 27 % | 50 % | 78 % |
+| `h1coarse500_s42` | 27 % | 37 % | 37 % | 73 % |
+Entraînement (dernier quart) : 30 % contre 34 %. Pas de différence démontrable ; les timeouts sont toujours des drones parqués (0,6 m/s, 95 % de pas sans gain, frontière la plus proche derrière un mur 98-99 %).
+**Parqué = équilibre de la politique DÉTERMINISTE** (20 maisons, actions avec bruit à l'évaluation) : base 35 % vic / 20 % mort / 45 % timeout -> avec bruit 40 / 50 / 10 ; coarse 30 / 35 / 35 -> 20 / 65 / 15.
+Le bruit débloque le drone (timeouts 45 -> 10 %) mais il meurt alors (20 -> 50 %) : quand il bouge, il va dans un mur. Même cause pour les deux échecs : aucune direction fiable vers la sortie (la frontière
+« la plus proche » traverse un mur dans 80-99 % des pas ; la carte, même plus large, n'a pas suffi). Réserves : 20-30 maisons, 1 seed (±10 points).
