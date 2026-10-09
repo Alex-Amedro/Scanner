@@ -1,19 +1,6 @@
-"""Environnement d'exploration/cartographie (plan sections 3 à 8).
+"""Gymnasium environment: a drone explores a generated building and builds an occupancy grid from a LiDAR.
 
-
-
-Étape "avant de brancher PPO" : cet environnement valide que la génération de
-
-bâtiment, le LiDAR (horizontal + vertical), la construction de la grille
-
-d'occupation et la détection de frontières fonctionnent ensemble. Le reward
-
-suit la formule du plan (section 6), mais rien n'indique encore qu'elle est
-
-bien réglée — c'est justement ce qu'on va pouvoir observer une fois que ça
-
-tourne.
-
+Contains the MuJoCo model, the LiDAR and grid updates, the frontier features, the PID cascade (velocity -> attitude -> rates) and the reward.
 """
 
 

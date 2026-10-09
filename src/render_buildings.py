@@ -1,6 +1,8 @@
-"""Dessin de dessus de bâtiments `house` + vérification automatique (accessibilité physique de toutes les pièces).
-Usage : python render_buildings.py --level 2 --n 12 --seed 100      (écrit ../diagnostics/buildings_level2.png)
-        python render_buildings.py --level 1 2 3 4 --stats 300      (statistiques sur 300 bâtiments par niveau, sans image)
+"""Plot house plans from above and check that every room is reachable.
+
+Usage:
+    python render_buildings.py --level 2 --n 12 --seed 100      # writes ../diagnostics/buildings_level2.png
+    python render_buildings.py --level 1 2 3 4 --stats 300      # statistics over 300 houses per level, no image
 """
 import argparse
 import os

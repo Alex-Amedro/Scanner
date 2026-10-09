@@ -1,8 +1,9 @@
-"""Test de fumée de la cascade PID (vitesse -> attitude -> taux) et des observations égocentriques,
-sans RL. Les contacts sont désactivés pour pouvoir voler en ligne droite à travers les murs : on
-teste la DYNAMIQUE, pas la navigation.
+"""Smoke test of the PID cascade (velocity -> attitude -> rates) and of the egocentric observations.
 
-Usage : python test_cascade.py
+Contacts are disabled so the drone can fly through walls: only the dynamics are tested.
+
+Usage:
+    python test_cascade.py
 """
 
 import mujoco

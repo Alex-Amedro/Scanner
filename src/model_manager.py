@@ -1,8 +1,7 @@
-"""Gestion des versions de modèles : v1, v2, v3... pour des entraînements
-frais, v1.1, v1.2... pour repartir d'une version existante. Chaque version a
-son propre dossier avec le modèle, la normalisation (VecNormalize) et des
-métadonnées — le checkpoint périodique écrase le précédent (pas d'accumulation
-de fichiers), seule la sauvegarde finale d'une version reste définitivement.
+"""Model versions: v1, v2... for fresh runs, v1.1, v1.2... for runs restarted from an existing version.
+
+Each version has its own folder with the model, the VecNormalize statistics and metadata.
+The periodic checkpoint overwrites the previous one; only the final save is kept.
 """
 
 import json

@@ -1,9 +1,11 @@
-"""Expert scripté (aucun apprentissage) pour l'imitation : décide UNIQUEMENT avec ce que voit le réseau (proximity_rays = 16 secteurs de distance,
-frontier_vector = compas BFS) pour que le réseau puisse en principe le copier exactement.
-  - direction = angle du premier pas du chemin BFS vers la frontière la plus proche ;
-  - vitesse = `speed_frac` x 6 m/s, réduite près des murs ;
-  - réflexe d'évitement : poussée à l'opposé des secteurs à moins de 0,8 m.
-Repère : cap fixe (no_yaw), repère du corps = repère du monde."""
+"""Scripted explorer used as the teacher for imitation (no learning).
+
+It decides from the same inputs as the network: the 16 distance sectors and the BFS frontier vector.
+  - heading: first step of the BFS path to the nearest frontier
+  - speed: speed_frac x 6 m/s, lower near walls
+  - avoidance: pushed away from sectors closer than 0.8 m
+Fixed heading, so the body frame is the world frame.
+"""
 import numpy as np
 
 N_BINS = 16

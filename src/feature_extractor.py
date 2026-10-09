@@ -1,6 +1,4 @@
-"""Extracteur de features pour PPO : un petit CNN sur le crop local (grille
-d'occupation, mémoire spatiale) + un petit MLP sur (frontières + rayons de
-relief + cinématique + couverture), concaténés en un vecteur latent unique.
+"""Feature extractor for PPO: a small CNN on the local map crop (when present) and an MLP on the other inputs, concatenated.
 """
 
 import gymnasium as gym
