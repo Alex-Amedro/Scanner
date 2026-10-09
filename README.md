@@ -1,31 +1,33 @@
 # Scanner
 
-A simulated drone enters an unknown house through a window and builds an occupancy map of it from a 2D LiDAR (MuJoCo).
+A simulated drone enters an unknown house through a window and builds a map of it with a 2D LiDAR (MuJoCo, Stable-Baselines3).
 
-![Level 1 house, top view: MuJoCo (left), occupancy grid built live (right)](demo/demo_expert_niveau1_seed9007.gif)
+> **This is a research project, not a finished product.** The question: can a drone learn to explore an unknown building end-to-end with reinforcement learning (RL)? After about two months of experiments, the honest answer so far is **not for realistic houses**: pure RL stalled at 27% success on the easiest ones. What works is a hybrid: a classical planner (BFS toward the nearest unexplored area), a neural policy trained to follow it, and a tuned flight controller. Everything below is measured, negative results included.
 
-*Scripted explorer, level 1 (seed 9007): enters through the window, maps the house, 100% coverage in 7 simulated seconds.*
+| <img width="460" src="demo/demo_expert_niveau1_seed9007.gif"> | <img width="460" src="demo/demo_expert_niveau1_seed9007_3d.gif"> |
+|:--|:--|
+| **Level 1, scripted explorer.** Enters through the window and maps the house: 100% coverage in 7 simulated seconds. | **Same flight, 3D camera** (walls drawn translucent). The orange side of the drone is its front. |
+| <img width="460" src="demo/demo_expert_niveau3_seed9000.gif"> | <img width="460" src="demo/demo_clone_niveau2_seed9002.gif"> |
+| **Level 3, scripted explorer.** Larger house with loops and several doors: 98% in 21 s. | **Level 2, learned policy** (neural network trained by imitation of the explorer): 98.5% in 13 s. |
 
-![Same flight, 3D follow camera](demo/demo_expert_niveau1_seed9007_3d.gif)
+In each gif: simulation on the left, the occupancy map built live on the right (LiDAR rays, target frontier as a star, BFS path in blue, coverage bar). Sped up, run until nothing new is discovered, on seeds the controllers were not trained on.
 
-*Same flight seen from a 3D follow camera (walls drawn translucent). The orange side of the drone is its front: the nose follows the direction of motion.*
+## In short
 
-![Level 3 house with loops, scripted explorer](demo/demo_expert_niveau3_seed9000.gif)
+| What | Result |
+|---|---|
+| Learned policy + PID cascade + CAPS smoothing, simple chain buildings | 100% success on 2 seeds |
+| **Pure RL in realistic houses (the research goal)** | **at best 27% (level 1): not solved** |
+| Scripted explorer (BFS + wall margin + avoidance reflex), levels 1 to 4 | 100 / 100 / 95 / 85% |
+| Neural policy trained by imitation of that explorer, levels 1 to 4 | 100 / 93 / 60 / 53% |
 
-*Scripted explorer, level 3 (seed 9000): larger house with loops and several doors, 98% coverage in 21 simulated seconds.*
+Levels: 1 = small house (3-4 rooms, 1.3-1.5 m window), 4 = large house (8-10 rooms, loops, 1.0-1.3 m doors).
 
-![Level 2 house, learned policy](demo/demo_clone_niveau2_seed9002.gif)
+- **Why pure RL failed:** not isolated. Two failure modes were measured: crashing into walls, and standing almost still (95% of the steps without discovering a cell). The straight-line direction to the nearest unexplored area crosses a wall in 80-99% of the steps, but replacing it with a BFS path or removing it did not improve success. The most likely remaining cause, exploration noise inside doors with +-0.5 m clearance, is not confirmed.
+- **What transfers anyway:** a tuned velocity-to-attitude controller, a smoothness regulariser (CAPS) that makes commands 4x smoother, a procedural house generator with a physical accessibility check, and the diagnosis above.
+- **What the learned policy is, and is not:** it imitates a scripted explorer and receives its BFS direction as an input. It does not discover where to go by itself, so it is not a result of end-to-end RL.
 
-*Learned policy (network trained by imitation of the scripted explorer), level 2 (seed 9002): hall with rooms on both sides, 98.5% coverage in 13 simulated seconds.*
-
-In every gif, left: the simulation; right: the occupancy map as it is built, with the LiDAR rays, the target frontier (star), the BFS path (blue) and the coverage. The gifs are sped up (about x1.3 at level 1, x2.7 to x3.3 for the larger houses), run until nothing new is discovered, and use evaluation seeds the controllers were not trained on. Final coverage is 98-100%: the coverage metric also counts cells inside wall volumes, which no sensor can see. `src/make_demo.py` renders other seeds, the 3D view, and mp4 files locally (mp4 files are not versioned).
-
-## Summary
-
-- Pure reinforcement learning (PPO) did **not** learn to explore the generated houses: at best 27% success on the easiest level (30 houses, one seed), whatever reward, input or horizon variant was tried.
-- A scripted frontier explorer (BFS path to the nearest frontier, wall margin, avoidance reflex) succeeds on 100 / 100 / 95 / 85% of houses at levels 1 to 4 (20 houses per level).
-- A neural network trained by imitation of that script reaches 100 / 93 / 60 / 53% (30 houses per level). It receives the BFS direction as an input, so it does not plan by itself.
-- What transfers regardless of the planner: a tuned velocity-to-attitude PID cascade, a temporal smoothness regulariser (CAPS) that makes commands 4x smoother, a procedural house generator with a physical accessibility check, and a measured diagnosis of why pure RL fails.
+The rest of this page gives the details: how it works, what worked, what did not (with numbers), limits, and how to reproduce.
 
 ## How it works
 
