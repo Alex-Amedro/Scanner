@@ -236,3 +236,6 @@ src/train.py
 # Scripts de mesure locaux (jetables)
 src/probes/
 logs_tmp/
+
+# Les mp4 de make_demo.py restent locaux (non lisibles dans la page GitHub) : seuls les gifs de demo/ sont versionnés
+demo/*.mp4
