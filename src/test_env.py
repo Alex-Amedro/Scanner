@@ -1,15 +1,11 @@
-"""Validation de la mécanique de base, sans RL branché (plan section 12).
+"""Basic check of the environment mechanics, without RL.
 
-Deux modes, via un seul switch :
-- rapide (par défaut) : pas de fenêtre, boucle à pleine vitesse, pour vérifier
-  que rien ne plante sur beaucoup de steps.
-- visuel (--visual) : ouvre le viewer MuJoCo, ralentit la boucle, affiche les
-  rayons LiDAR (rouge=proche, vert=loin) et les frontières détectées (points
-  bleus) par-dessus la scène.
+Fast mode (default): no window, full speed, to check that nothing crashes over many steps.
+Visual mode (--visual): MuJoCo viewer, slowed down, LiDAR rays (red = near, green = far) and detected frontiers (blue dots).
 
-Usage :
-    python test_env.py                # rapide, 300 steps
-    python test_env.py --visual        # visuel, 100 steps par défaut
+Usage:
+    python test_env.py                  # 300 steps
+    python test_env.py --visual         # 100 steps
     python test_env.py --visual --steps 500
 """
 

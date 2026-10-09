@@ -1,9 +1,12 @@
-"""Imitation (clonage de comportement) de l'expert scripté (expert.py) par le réseau PPO existant (MLP + CNN carte), mêmes entrées que l'entraînement RL.
-1. L'expert joue sur des maisons de niveaux variés ; l'action EXÉCUTÉE reçoit du bruit (DART : couvre des états décalés), l'action ENREGISTRÉE est celle,
-   propre, de l'expert dans l'état atteint.
-2. Le réseau apprend à reproduire l'action moyenne (MSE) ; les stats de normalisation des entrées viennent de ces données.
-3. Sauvegarde au format des autres modèles (évaluable avec evaluate.py ; --max-steps 3000 pour les grandes maisons ; affinable ensuite par PPO).
-Usage : python imitate.py --name bc_s42 --levels 1 4 --samples 60000"""
+"""Imitate the scripted explorer (expert.py) with the PPO policy network (MLP + CNN).
+
+  1. The expert plays on houses of several levels. Noise is added to the executed action; the clean expert action is recorded.
+  2. The network learns to reproduce the expert's mean action (MSE). Input normalisation comes from the same data.
+  3. The model is saved like the others (evaluate it with evaluate.py, --max-steps 3000 for large houses).
+
+Usage:
+    python imitate.py --name bc2_s42 --levels 1 4 --samples 80000 --epochs 25
+"""
 import argparse
 import json
 import sys

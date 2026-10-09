@@ -1,13 +1,8 @@
-"""PPO + CAPS (Conditioning for Action Policy Smoothness, Mysore et al., ICRA 2021, arXiv 2012.06644), terme TEMPOREL seulement.
+"""PPO with CAPS (Mysore et al., ICRA 2021, arXiv 2012.06644), temporal term only.
 
-L_T = || mu(s_t) - mu(s_{t+1}) ||^2, où mu est l'ACTION MOYENNE (déterministe) de la politique sur deux pas CONSÉCUTIFS d'un même épisode.
-Ce terme est ajouté à la perte de PPO (pas au reward) :
-  - le bruit d'exploration ne peut pas le déclencher (on pénalise la moyenne, jamais l'action échantillonnée) -> impossible de le
-    « gagner » en mourant tôt (c'était le défaut de la pénalité sur l'action échantillonnée) ;
-  - il ne passe pas par le retour cumulé, donc la normalisation du reward ne peut pas l'écraser.
-
-Adaptation à Stable-Baselines3 2.9.0 : la méthode train() est celle de PPO, copiée avec un seul ajout. Les paires (t, t+1) sont construites AVANT
-la première lecture du tampon (get() le réorganise ensuite par environnement) et on exclut tout couple qui traverse une fin d'épisode.
+Adds ||mu(s_t) - mu(s_t+1)||^2 to the PPO loss, where mu is the policy's mean action on two consecutive steps of the same episode. This makes the commands smoother.
+It acts on the mean action (not the sampled one) and goes into the loss (not the reward).
+train() is the Stable-Baselines3 2.9.0 PPO.train with that one addition.
 """
 import numpy as np
 import torch as th

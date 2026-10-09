@@ -1,18 +1,13 @@
-"""Générateur de bâtiments « maison » (v2) : plan découpé en pièces de tailles variées, portes à positions
-variables (extrémités comprises), pièces à plusieurs portes (boucles -> retours en arrière), hall central
-optionnel avec des pièces à gauche et à droite, et UNE seule entrée : une fenêtre dans la façade sud, donnant
-sur une cour fermée où le drone démarre.
+"""House generator (levels 1-4): rooms of varied sizes, doors at varied positions, extra doors that create loops, an optional central hall,
+and a single entrance: a window in the south wall, facing a closed courtyard where the drone starts.
 
-Principe de construction (voir _generate_once) :
-  1. rectangle (largeur W en x, profondeur H en y) ; façade sud en y = 0 ;
-  2. [optionnel] bande de hall sur toute la profondeur, puis découpage récursif (BSP) de chaque côté ;
-  3. arêtes = murs partagés entre deux pièces ; arbre couvrant aléatoire (tout est accessible) + portes en plus
-     avec probabilité p_loop (boucles) ; position de porte aléatoire sur le mur partagé, extrémité avec prob. p_end ;
-  4. fenêtre dans la façade sud (rebord en bas + linteau en haut : le LiDAR à 1,2 m la voit comme une ouverture).
+Construction:
+  1. a W x H rectangle, south wall at y = 0
+  2. optional hall strip, then recursive splitting into rooms
+  3. random spanning tree of doors (every room reachable) plus extra doors (loops)
+  4. window with a sill and a lintel (the 1.2 m LiDAR sees it as an opening)
 
-La structure (boîtes de mur) est la SEULE source pour le XML MuJoCo, la vérification d'accessibilité et le dessin.
-Niveaux de difficulté : LEVELS (1 = petite maison sans boucle, 4 = grande maison à retours en arrière).
-Aucun étage pour l'instant (champ `floor` des pièces réservé).
+The wall boxes are the single source for the MuJoCo XML, the accessibility check and the plots. One floor only.
 """
 import math
 from dataclasses import dataclass

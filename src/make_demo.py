@@ -1,15 +1,14 @@
-"""Vidéo de démonstration en écran partagé, sans entraînement ni modification de l'environnement (la vidéo ne fait qu'observer).
+"""Split-screen demo videos and gifs. It only observes the environment, never changes its behaviour.
 
-Gauche : rendu MuJoCo du drone dans la maison, vue du dessus (plafond rendu invisible, le plafond n'a pas d'effet sur le LiDAR).
-Droite : la grille d'occupation qui se remplit (mêmes couleurs que debug_grid.py : vert = libre, corail = mur, gris = inconnu), avec la
-position et le cap du drone, les 180 rayons LiDAR de la dernière frame, la frontière visée (étoile) et le chemin BFS, et la couverture.
-Le contrôleur est l'expert scripté (src/expert.py : chemin BFS + marge + réflexe d'évitement) ou le clone appris (--policy clone).
-Le lacet réaliste est actif (le nez suit la direction de déplacement, le réseau/l'expert reste dans le repère du monde).
+Left: MuJoCo view (top view or 3D follow camera). Right: the occupancy grid built live, with the LiDAR rays, the drone and its heading,
+the target frontier, the BFS path and the coverage. The controller is the scripted explorer (default) or the learned policy (--policy clone).
+The nose follows the direction of motion.
 
-Usage :
-    python make_demo.py --list --level 1 --seed-range 9000 9015          # trouver les seeds gagnants (pas de vidéo)
-    python make_demo.py --level 1 --seeds 9001 9004 --out ../demo        # une vidéo mp4 par seed
-    python make_demo.py --level 2 --seeds 9003 --policy clone --model bc2_s42 --out ../demo
+Usage:
+    python make_demo.py --list --level 1 --seed-range 9000 9016          # which seeds finish
+    python make_demo.py --level 1 --seeds 9007 --gif --out ../demo
+    python make_demo.py --policy clone --model bc2_s42 --level 2 --seeds 9002 --out ../demo
+    python make_demo.py --view follow --level 1 --seeds 9007 --out ../demo   # 3D camera
 """
 import argparse
 import os
@@ -42,7 +41,7 @@ EXPERT_KW = {"task": "explore", "gear_roll_pitch": 0.5, "gear_yaw": 0.25, "up_z_
              "action_mode": "velocity", "start_outside": True, "frontier_mode": "bfs", "bfs_clearance_m": 0.45, "building": "house",
              "n_rooms": (3, 3), "max_steps": 3000}
 OPT = dict(full=True, stag=600, yaw_rate=1.2, yaw_min_speed=0.8, view="top")   # modifiées par la ligne de commande
-COLORS = np.array([[0x8F, 0xD1, 0x9E], [0xE0, 0x7A, 0x5F], [0xCC, 0xCC, 0xCC]], dtype=np.uint8)   # libre, mur, inconnu (debug_grid.py)
+COLORS = np.array([[0x8F, 0xD1, 0x9E], [0xE0, 0x7A, 0x5F], [0xCC, 0xCC, 0xCC]], dtype=np.uint8)   # free, wall, unknown
 
 
 def make_font(size):
@@ -279,21 +278,21 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--level", type=int, default=1)
     ap.add_argument("--seeds", type=int, nargs="+", default=[9001])
-    ap.add_argument("--seed-range", type=int, nargs=2, default=None, help="Remplace --seeds : tous les seeds de a à b-1.")
+    ap.add_argument("--seed-range", type=int, nargs=2, default=None, help="Replaces --seeds: every seed from a to b-1.")
     ap.add_argument("--policy", choices=["expert", "clone"], default="expert")
-    ap.add_argument("--model", default="bc2_s42", help="Modèle du clone (--policy clone).")
+    ap.add_argument("--model", default="bc2_s42", help="Model used by --policy clone.")
     ap.add_argument("--out", default=os.path.join("..", "demo"))
-    ap.add_argument("--stride", type=int, default=3, help="Une image tous les N pas de simulation (50 pas = 1 s) : 3 -> 1,7x le temps réel à 30 fps.")
+    ap.add_argument("--stride", type=int, default=3, help="One frame every N simulation steps (50 steps = 1 s): 3 gives 1.7x real time at 30 fps.")
     ap.add_argument("--fps", type=int, default=30)
-    ap.add_argument("--size", type=int, default=720, help="Côté d'un panneau en pixels (la vidéo fait 2 x size de large).")
-    ap.add_argument("--azimuth", type=float, default=90.0, help="Orientation de la vue du dessus (à ajuster si la carte semble tournée).")
-    ap.add_argument("--gif", action="store_true", help="Écrit aussi un gif allégé (demi-résolution) pour le README.")
-    ap.add_argument("--list", action="store_true", help="Ne rend rien : donne l'issue de chaque seed pour choisir les vidéos.")
-    ap.add_argument("--view", choices=["top", "follow"], default="top", help="Panneau de gauche : vue du dessus ou caméra de suivi 3D.")
-    ap.add_argument("--stop-at-target", action="store_true", help="Ancien comportement : l'épisode s'arrête à 90 % (par défaut : jusqu'à ce que plus rien ne soit découvert).")
-    ap.add_argument("--stag", type=int, default=600, help="Fin d'épisode (mode complet) après N pas sans case nouvelle ; la fin normale est : plus aucune frontière valide pendant 25 pas.")
-    ap.add_argument("--yaw-rate", type=float, default=1.2, help="Vitesse max de rotation du nez, rad/s (affichage seulement).")
-    ap.add_argument("--yaw-min-speed", type=float, default=0.8, help="Le nez ne tourne qu'au-dessus de cette vitesse, m/s.")
+    ap.add_argument("--size", type=int, default=720, help="Side of one panel in pixels (the video is 2 x size wide).")
+    ap.add_argument("--azimuth", type=float, default=90.0, help="Orientation of the top view (adjust if the map looks rotated).")
+    ap.add_argument("--gif", action="store_true", help="Also write a lighter gif (half resolution) for the README.")
+    ap.add_argument("--list", action="store_true", help="Render nothing: print the outcome of each seed, to choose the videos.")
+    ap.add_argument("--view", choices=["top", "follow"], default="top", help="Left panel: top view or 3D follow camera.")
+    ap.add_argument("--stop-at-target", action="store_true", help="Stop the episode at 90%% coverage (default: run until nothing new is discovered).")
+    ap.add_argument("--stag", type=int, default=600, help="End the episode after N steps without a new cell (full mode). The normal end is no valid frontier for 25 steps.")
+    ap.add_argument("--yaw-rate", type=float, default=1.2, help="Maximum nose rotation rate, rad/s (display only).")
+    ap.add_argument("--yaw-min-speed", type=float, default=0.8, help="The nose only turns above this speed, m/s.")
     a = ap.parse_args()
     OPT.update(full=not a.stop_at_target, stag=a.stag, yaw_rate=a.yaw_rate, yaw_min_speed=a.yaw_min_speed, view=a.view)
     seeds = list(range(*a.seed_range)) if a.seed_range else a.seeds

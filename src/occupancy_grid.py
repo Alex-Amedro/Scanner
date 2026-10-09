@@ -1,6 +1,4 @@
-"""Grille d'occupation 2D, mise à jour par tracé de rayons (Bresenham), et
-détection de frontières par clustering (flood-fill maison, sans scipy —
-volontairement pour ne pas ajouter de dépendance à l'environnement figé).
+"""2D occupancy grid updated by ray tracing (Bresenham), with frontier detection by flood fill (plain numpy, no scipy).
 """
 
 import numpy as np

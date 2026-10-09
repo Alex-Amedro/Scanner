@@ -1,11 +1,10 @@
-"""Réponses indicielles des 3 boucles du contrôleur, TESTÉES SÉPARÉMENT, sans RL (méthode standard en cascade) :
-  1. boucle de TAUX seule      : consigne de vitesse de roulis constante -> vitesse de roulis réelle
-  2. boucle d'ATTITUDE seule   : consigne d'angle de roulis fixe          -> angle réel
-  3. boucle de VITESSE seule   : consigne de vitesse fixe                 -> vitesse réelle (+ inclinaison)
-Contacts désactivés (le drone traverse les murs), seule la dynamique compte. Sortie : un PNG + un tableau de métriques.
+"""Step responses of the three controller loops, each tested alone, without RL: rate, attitude, velocity.
 
-Usage : python step_response.py            (écrit ../diagnostics/step_response.png)
-        python step_response.py --kp-vel 3 --ki-vel 0 --kp-att 6 --kp-rate 0.15 --ki-rate 0.2 --kd-rate 0.003
+Contacts are disabled (the drone flies through walls): only the dynamics matter. Writes a PNG and prints rise time, overshoot and settling time.
+
+Usage:
+    python step_response.py
+    python step_response.py --kp-vel 3 --ki-vel 0 --kp-att 6 --kp-rate 0.15 --ki-rate 0.2 --kd-rate 0.003
 """
 import argparse
 import os

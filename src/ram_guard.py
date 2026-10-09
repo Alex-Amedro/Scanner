@@ -1,8 +1,6 @@
-"""Garde-fou RAM pour l'entraînement : estimation avant lancement (pour adapter --n-envs), mesure
-en cours de route, et nettoyage final des processus workers.
+"""RAM guard for training: estimate the memory before launch (to choose --n-envs), measure it during the run, clean up the worker processes at the end.
 
-Volontairement sans torch/SB3 : ce module est importé par train.py au niveau module, que Windows
-relance dans CHAQUE worker SubprocVecEnv (cf. commentaire en tête de main() dans train.py).
+It does not import torch or SB3 on purpose: train.py imports this module at top level, and Windows imports it again in every SubprocVecEnv worker.
 """
 
 import gc

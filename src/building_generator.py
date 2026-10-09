@@ -1,8 +1,6 @@
-"""Génération procédurale d'un bâtiment simple : pièces rectangulaires alignées
-le long de Y, reliées par des couloirs. Volontairement basique pour la V1
-(cf. plan section 8) — la structure (liste de pièces + couloirs) est gardée
-séparée du rendu XML pour pouvoir brancher un générateur plus riche plus tard
-sans toucher au reste du pipeline (LiDAR / grille / frontières).
+"""First building generator: rectangular rooms in a line along Y, joined by corridors.
+
+Kept for the earlier chain-of-rooms experiments. The layout (rooms and corridors) is separate from the MuJoCo XML.
 """
 
 import random
@@ -67,7 +65,7 @@ def generate_layout(n_rooms=(2, 4), room_width_range=(4.0, 7.0),
     # Décalage en x de chaque couloir : contraint pour rester dans les deux
     # pièces qu'il relie, avec une marge — casse la ligne de vue rectiligne
     # qu'un couloir toujours centré en x=0 créait sur toute la longueur du
-    # bâtiment (cf. journal d'expérimentation, diagnostic via debug_grid.py).
+    # bâtiment (see the experiment journal).
     gap_half = corridor_width / 2
     margin = 0.3
     corridor_x_offsets = []

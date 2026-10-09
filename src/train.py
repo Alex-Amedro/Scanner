@@ -1,29 +1,13 @@
-"""Entraînement PPO avec système de versions (plan section 7 + demande de
+"""PPO training with model versions.
 
-reprise/versioning) :
+  - no option: a new fresh version (v1, then v2, v3...)
+  - --resume: continue the latest version of --name where it stopped (same model and normalisation, the step counter continues)
+  - --from-version v1: start from the weights of v1 and write a new derived version (v1.1, v1.2...)
 
-
-
-- Sans option : crée une nouvelle version fraîche (v1, puis v2, v3...).
-
-- --resume : reprend la dernière version de --name là où elle s'est arrêtée
-
-  (même modèle, même normalisation, le compteur de steps continue).
-
-- --from-version v1 : repart des poids de v1 mais écrit dans une nouvelle
-
-  version dérivée (v1.1, puis v1.2 si on refait --from-version v1 encore).
-
-
-
-Usage :
-
-    python train.py --name explorer --total-timesteps 2000000          # v1
-
-    python train.py --name explorer --resume --total-timesteps 2000000 # continue v1
-
-    python train.py --name explorer --from-version v1 --total-timesteps 500000  # v1.1
-
+Usage:
+    python train.py --name explorer --total-timesteps 2000000
+    python train.py --name explorer --resume --total-timesteps 2000000
+    python train.py --name explorer --from-version v1 --total-timesteps 500000
 """
 
 

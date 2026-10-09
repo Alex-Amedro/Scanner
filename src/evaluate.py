@@ -1,14 +1,10 @@
-"""Évaluation d'un modèle sur plusieurs épisodes, avec un journal persistant
-pour comparer les runs entre eux au fil du temps.
+"""Evaluate a trained model on fixed seeds and append the result to eval_logs/journal.csv.
 
-Les bâtiments évalués sont toujours les MÊMES (seeds fixes, par défaut
-9000-9009, en dehors de la plage utilisée à l'entraînement) — pour que
-comparer v1 à v2 dans 3 semaines soit une vraie comparaison, pas du bruit dû
-à des bâtiments différents.
+The evaluation houses are always the same (seeds 9000+ by default, outside the training seeds), so runs can be compared.
 
-Usage :
+Usage:
     python evaluate.py --name explorer --version v1
-    python evaluate.py --name explorer --version v1 --n-episodes 20
+    python evaluate.py --name explorer --n-episodes 20 --building house --house-level 2 --max-steps 3000
 """
 
 import argparse
