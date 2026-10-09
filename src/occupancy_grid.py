@@ -11,6 +11,7 @@ UNKNOWN = -1
 
 
 class OccupancyGrid:
+    record_path = False   # démo vidéo : garder le chemin BFS dans le résultat (clé path_xy) ; aucun effet sur les décisions
     def __init__(self, x_range, y_range, resolution=0.15):
         self.resolution = resolution
         self.x_min, self.x_max = x_range
@@ -221,8 +222,8 @@ class OccupancyGrid:
                            "size": 0, "valid": 0.0})
         return top_k
 
-    def frontier_features_bfs(self, drone_x, drone_y, drone_yaw, k=2, clearance_m=0.30, lookahead_cells=7,
-                              dist_scale_m=30.0, info_radius_cells=4):
+    def _bfs_features(self, drone_x, drone_y, drone_yaw, k=2, clearance_m=0.30, lookahead_cells=7,
+                              dist_scale_m=30.0, info_radius_cells=4, _r=None):
         """Comme frontier_features, mais les frontières sont classées par DISTANCE DE CHEMIN (à travers les cases libres connues de la
         carte du drone), pas à vol d'oiseau, et l'angle donné est celui du PREMIER PAS (point du chemin à ~lookahead_cells cases), pas la
         direction à vol d'oiseau, qui traverse souvent un mur. Ce n'est PAS un planificateur : le réseau garde le contrôle, l'évitement et le
@@ -241,7 +242,7 @@ class OccupancyGrid:
         for i, cells in enumerate(clusters):
             arr = np.asarray(cells)
             lab[arr[:, 1], arr[:, 0]] = i + 1
-        r = max(0, int(round(clearance_m / self.resolution)))
+        r = _r if _r is not None else max(0, int(round(clearance_m / self.resolution)))
         blocked = _dilate8(self.grid == OCCUPIED, r)
         trav = (self.grid == FREE) & ~blocked
         dcx, dcy = self.world_to_cell(drone_x, drone_y)
@@ -271,6 +272,7 @@ class OccupancyGrid:
                     cur = nb
                 if dist[dcy, dcx] >= 0:
                     cx, cy, steps, waypoint = dcx, dcy, 0, None
+                    path_cells = [(dcx, dcy)] if self.record_path else None
                     while dist[cy, cx] > 0:       # descente jusqu'à la case-frontière source
                         best = None
                         for dy, dx in diag:
@@ -278,6 +280,8 @@ class OccupancyGrid:
                             if 0 <= ny < H and 0 <= nx < W and 0 <= dist[ny, nx] < dist[cy, cx] and (best is None or dist[ny, nx] < dist[best[0], best[1]]):
                                 best = (ny, nx)
                         cy, cx = best
+                        if path_cells is not None:
+                            path_cells.append((cx, cy))
                         steps += 1
                         if steps == lookahead_cells:
                             waypoint = (cx, cy)
@@ -290,9 +294,19 @@ class OccupancyGrid:
                     x0, x1 = max(0, cx - info_radius_cells), min(W, cx + info_radius_cells + 1)
                     feat = {"distance_norm": min(float(dist[dcy, dcx]) * self.resolution / dist_scale_m, 1.0), "angle_norm": ang / np.pi,
                             "info_gain_norm": min(int(np.count_nonzero(self.grid[y0:y1, x0:x1] == UNKNOWN)) / max_info, 1.0),
-                            "world_xy": (tx, ty), "size": len(clusters[used - 1]), "valid": 1.0}
+                            "world_xy": (tx, ty), "size": len(clusters[used - 1]), "valid": 1.0,
+                            "path_xy": [self.cell_to_world(px, py) for px, py in path_cells] if path_cells is not None else None}
             out.append(feat)
         return out
+
+    def frontier_features_bfs(self, drone_x, drone_y, drone_yaw, k=2, clearance_m=0.30, **kw):
+        """BFS avec marge adaptative : on essaie la marge demandée, et si AUCUNE frontière n'est atteignable (fenêtre ou porte étroite
+        fermée par la marge), on réduit la marge d'une case (15 cm) jusqu'à 0. Le chemin reste le plus dégagé possible quand c'est possible."""
+        r0 = max(0, int(round(clearance_m / self.resolution)))
+        for r in range(r0, -1, -1):
+            out = self._bfs_features(drone_x, drone_y, drone_yaw, k=k, clearance_m=clearance_m, _r=r, **kw)
+            if out[0]["valid"] > 0 or r == 0:
+                return out
 
     def potential(self, frontiers, beta=0.5):
         """Champ de potentiel de frontière (plan section 6) :
