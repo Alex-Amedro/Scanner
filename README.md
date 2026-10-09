@@ -4,18 +4,21 @@ A simulated drone enters an unknown house through a window and builds an occupan
 
 ![Level 1 house, top view: MuJoCo (left), occupancy grid built live (right)](demo/demo_expert_niveau1_seed9007.gif)
 
-![Same flight, 3D follow camera (walls drawn translucent): the nose follows the direction of motion](demo/demo_expert_niveau1_seed9007_3d.gif)
+*Scripted explorer, level 1 (seed 9007): enters through the window, maps the house, 100% coverage in 7 simulated seconds.*
 
-Full-length videos (left: simulation, right: the map as it is built, with LiDAR rays, target frontier, BFS path and coverage). The gifs above play inline; the mp4 files open in the browser's player.
+![Same flight, 3D follow camera](demo/demo_expert_niveau1_seed9007_3d.gif)
 
-| Controller, view | Level 1, seed 9007 | Level 2, seed 9002 | Level 2, seed 9003 |
-|---|---|---|---|
-| Scripted explorer, top view | [mp4](demo/demo_expert_niveau1_seed9007.mp4) | [mp4](demo/demo_expert_niveau2_seed9002.mp4) | [mp4](demo/demo_expert_niveau2_seed9003.mp4) |
-| Scripted explorer, 3D follow camera | [mp4](demo/demo_expert_niveau1_seed9007_3d.mp4) | [mp4](demo/demo_expert_niveau2_seed9002_3d.mp4) | [mp4](demo/demo_expert_niveau2_seed9003_3d.mp4) |
-| Learned policy (imitation), top view | [mp4](demo/demo_clone_niveau1_seed9007.mp4) | [mp4](demo/demo_clone_niveau2_seed9002.mp4) | [mp4](demo/demo_clone_niveau2_seed9003.mp4) |
-| Learned policy (imitation), 3D follow camera | [mp4](demo/demo_clone_niveau1_seed9007_3d.mp4) | - | [mp4](demo/demo_clone_niveau2_seed9003_3d.mp4) |
+*Same flight seen from a 3D follow camera (walls drawn translucent). The orange side of the drone is its front: the nose follows the direction of motion.*
 
-The videos are slightly sped up (x1.25 at level 1, x1.7 at level 2), run until nothing new is discovered, and use evaluation seeds the controllers were not trained on. Final coverage is 98.5-100%: the coverage metric also counts cells inside wall volumes, which no sensor can see.
+![Level 3 house with loops, scripted explorer](demo/demo_expert_niveau3_seed9000.gif)
+
+*Scripted explorer, level 3 (seed 9000): larger house with loops and several doors, 98% coverage in 21 simulated seconds.*
+
+![Level 2 house, learned policy](demo/demo_clone_niveau2_seed9002.gif)
+
+*Learned policy (network trained by imitation of the scripted explorer), level 2 (seed 9002): hall with rooms on both sides, 98.5% coverage in 13 simulated seconds.*
+
+In every gif, left: the simulation; right: the occupancy map as it is built, with the LiDAR rays, the target frontier (star), the BFS path (blue) and the coverage. The gifs are sped up (about x1.3 at level 1, x2.7 to x3.3 for the larger houses), run until nothing new is discovered, and use evaluation seeds the controllers were not trained on. Final coverage is 98-100%: the coverage metric also counts cells inside wall volumes, which no sensor can see. `src/make_demo.py` renders other seeds, the 3D view, and mp4 files locally (mp4 files are not versioned).
 
 ## Summary
 
@@ -124,11 +127,11 @@ Expert and clone on the same evaluation seeds (9000+):
 ```
 pip install -r requirements_runner.txt imageio imageio-ffmpeg
 
-# videos (list the seeds that finish, then render)
+# demo gifs (list the seeds that finish, then render; mp4 files are written next to the gifs and not versioned)
 python src/make_demo.py --list --level 2 --seed-range 9000 9012
-python src/make_demo.py --level 2 --seeds 9002 9003 --stride 3 --out demo
-python src/make_demo.py --policy clone --model bc2_s42 --level 2 --seeds 9002 --out demo
-python src/make_demo.py --level 1 --seeds 9007 --view follow --yaw-rate 1.0 --out demo/test   # 3D follow camera
+python src/make_demo.py --level 2 --seeds 9002 --stride 4 --gif --out demo
+python src/make_demo.py --policy clone --model bc2_s42 --level 2 --seeds 9002 --stride 4 --gif --out demo
+python src/make_demo.py --level 1 --seeds 9007 --view follow --gif --out demo   # 3D follow camera
 
 # imitation of the scripted explorer, then evaluation
 python src/imitate.py --name bc2_s42 --samples 80000 --epochs 25
