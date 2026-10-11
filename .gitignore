@@ -246,3 +246,6 @@ demo/*.mp4
 # Journaux d execution des mesures SLAM (les csv sont versionnes)
 docs/results/*_log.txt
 docs/results/gate3_done.txt
+
+# Les résultats bruts des mesures SLAM sont versionnés
+!docs/results/*.csv
