@@ -143,7 +143,7 @@ class ExplorerEnv(gym.Env):
                  no_yaw=False, action_mode="velocity", start_outside=False, drag=0.0, coeff_action_rate=0.0, coeff_tilt_rate=0.0, ref_accel_limit=0.0, direct_tau=0.15, direct_a_max=12.0, action_deadzone=0.0,
                  yaw_follow=False, yaw_follow_rate=1.5, yaw_follow_min_speed=0.8, yaw_follow_offset=-np.pi / 2,
                  building="chain", house_level=2, crop_cell=None, frontier_mode="euclid", bfs_clearance_m=0.30,
-                 pose_source="oracle", odom_noise="medium",
+                 pose_source="oracle", odom_noise="medium", shadow_odom=False,
                  stagnation_start=0, stagnation_penalty=0.1, stagnation_limit=0,
 
                  max_steps=2000, seed=None, **obsolete):
@@ -276,6 +276,11 @@ class ExplorerEnv(gym.Env):
         self.est_grid = None
         self._odom = None
         self._slam = None
+        # shadow_odom : (slam modes) also integrate, on the SAME noisy measurements and the SAME scans, a pure dead-reckoning pose and map. Nothing
+        # uses them to decide: they only allow a like-for-like comparison of the estimators on one flight.
+        self.shadow_odom = shadow_odom
+        self.shadow_grid, self._shadow = None, None
+        self.shadow_err, self.shadow_yaw_err = [], []
         self.pose_err, self.yaw_err, self.path_length = [], [], 0.0
         self.crop_cell = crop_cell   # côté (m) d'une case du crop de carte ; None = résolution de la grille
         # Stagnation (0 = désactivé) : après `stagnation_start` pas SANS découvrir aucune case, pénalité de `stagnation_penalty`
@@ -509,6 +514,8 @@ class ExplorerEnv(gym.Env):
         self.grid.set_reachable_mask(compute_navigable_rects(self.layout))
 
         self.est_grid, self._odom, self._slam = None, None, None
+        self.shadow_grid, self._shadow = None, None
+        self.shadow_err, self.shadow_yaw_err = [], []
         self.pose_err, self.yaw_err, self.path_length = [], [], 0.0
         if self.pose_source != "oracle":
             self.est_grid = OccupancyGrid(self.layout.world_x_range, self.layout.world_y_range, resolution=self.grid_resolution)
@@ -518,6 +525,10 @@ class ExplorerEnv(gym.Env):
             self._true_xy_prev = np.array([p0[0], p0[1]])
             cls = ScanMatchedPose if self.pose_source in ("slam", "slam_lc") else DeadReckoning
             self._slam = PoseGraphSlam() if self.pose_source == "slam_lc" else None
+            if self.shadow_odom and self.pose_source in ("slam", "slam_lc"):
+                self.shadow_grid = OccupancyGrid(self.layout.world_x_range, self.layout.world_y_range, resolution=self.grid_resolution)
+                self.shadow_grid.set_reachable_mask(compute_navigable_rects(self.layout))
+                self._shadow = DeadReckoning(self.odom_noise, np.random.default_rng(0), p0[0], p0[1], self._true_yaw_prev)
             self._odom = cls(self.odom_noise, np.random.default_rng(self._rng.getrandbits(32)), p0[0], p0[1], self._true_yaw_prev)
 
         self._corridor_rects = (self.layout.corridor_rects if self.building == "house"
@@ -556,7 +567,12 @@ class ExplorerEnv(gym.Env):
         v_body = np.array([c * vw[0] + s * vw[1], -s * vw[0] + c * vw[1]])
         yaw_rate = ((yaw - self._true_yaw_prev + np.pi) % (2 * np.pi) - np.pi) / dt
         self._true_yaw_prev = yaw
-        est = self._odom.step(v_body, yaw_rate, dt)
+        v_meas, w_meas = self._odom.measure(v_body, yaw_rate)
+        est = self._odom.integrate(v_meas, w_meas, dt)
+        if self._shadow is not None:
+            sh = self._shadow.integrate(v_meas, w_meas, dt)
+            self.shadow_err.append(float(np.hypot(sh[0] - p[0], sh[1] - p[1])))
+            self.shadow_yaw_err.append(float((sh[2] - yaw + np.pi) % (2 * np.pi) - np.pi))
         self.pose_err.append(float(np.hypot(est[0] - p[0], est[1] - p[1])))
         self.yaw_err.append(float((est[2] - yaw + np.pi) % (2 * np.pi) - np.pi))
         xy = np.array([p[0], p[1]])
@@ -957,7 +973,7 @@ class ExplorerEnv(gym.Env):
             self.viewer.close()
             self.viewer = None
         self._viewer_model = None
-        self.model = self.data = self.grid = self.est_grid = None
+        self.model = self.data = self.grid = self.est_grid = self.shadow_grid = None
 
     def _in_corridor(self, x, y):
 
@@ -1041,6 +1057,12 @@ class ExplorerEnv(gym.Env):
             ex_end, ey_end = ex + np.cos(ea) * d, ey + np.sin(ea) * d
             for i in range(len(d)):
                 self.est_grid.update_ray((ex, ey), (ex_end[i], ey_end[i]), h[i])
+            if self._shadow is not None:
+                sx, sy, syaw = self._shadow.pose
+                sa = b + syaw
+                sx_end, sy_end = sx + np.cos(sa) * d, sy + np.sin(sa) * d
+                for i in range(len(d)):
+                    self.shadow_grid.update_ray((sx, sy), (sx_end[i], sy_end[i]), h[i])
             if self._slam is not None:
                 tp = self.data.body("drone_body").xpos
                 corrected = self._slam.process(self._odom.pose, b, d, h, (tp[0], tp[1], true_yaw), self.est_grid)

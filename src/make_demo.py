@@ -40,7 +40,7 @@ EXPERT_KW = {"task": "explore", "gear_roll_pitch": 0.5, "gear_yaw": 0.25, "up_z_
              "obs_keys": ["proximity_rays", "frontier_vector", "velocity"], "fixed_altitude": True, "k_frontiers": 2, "no_yaw": True,
              "action_mode": "velocity", "start_outside": True, "frontier_mode": "bfs", "bfs_clearance_m": 0.45, "building": "house",
              "n_rooms": (3, 3), "max_steps": 3000}
-OPT = dict(pose_source="oracle", odom_noise="medium", full=True, stag=600, yaw_rate=1.2, yaw_min_speed=0.8, view="top")   # modifiées par la ligne de commande
+OPT = dict(compare=False, pose_source="oracle", odom_noise="medium", full=True, stag=600, yaw_rate=1.2, yaw_min_speed=0.8, view="top")   # modifiées par la ligne de commande
 COLORS = np.array([[0x8F, 0xD1, 0x9E], [0xE0, 0x7A, 0x5F], [0xCC, 0xCC, 0xCC]], dtype=np.uint8)   # free, wall, unknown
 
 
@@ -120,11 +120,12 @@ class RightPanel:
         self.slam = env._slam is not None          # pose graph overlay: keyframes, odometry edges (grey), loop edges (red)
         self.n_frames, self.last_loops, self.flash_until = 0, 0, -1
         if self.slam:
-            self.g_odom = LineCollection([], colors="#777777", linewidths=1.0, zorder=4)
+            self.loop_seen = {}                # loop edge index -> frame at which it first appeared (loop edges are drawn only briefly)
+            self.g_odom = LineCollection([], colors="#b0b0b0", linewidths=0.8, zorder=4)
             self.g_loop = LineCollection([], colors="#d62828", linewidths=2.2, zorder=6)
             self.ax.add_collection(self.g_odom)
             self.ax.add_collection(self.g_loop)
-            self.nodes, = self.ax.plot([], [], marker="o", color="#222222", ms=4, ls="", zorder=6)
+            self.nodes, = self.ax.plot([], [], marker="o", color="#222222", ms=3.2, ls="", zorder=6)
             self.flash = self.ax.text(0.5, 0.985, "", transform=self.ax.transAxes, ha="center", va="top", fontsize=12, weight="bold", color="white",
                                       bbox=dict(facecolor="#d62828", alpha=0.92, edgecolor="none", pad=4), zorder=20)
         self.rays = LineCollection([], colors="#3d5a80", linewidths=0.4, alpha=0.45, zorder=3)
@@ -198,7 +199,11 @@ class RightPanel:
             pts = np.array([k.pose[:2] for k in sl.kfs]) if sl.kfs else np.zeros((0, 2))
             self.nodes.set_data(pts[:, 0], pts[:, 1])
             self.g_odom.set_segments([[tuple(sl.kfs[i].pose[:2]), tuple(sl.kfs[j].pose[:2])] for i, j, m, kd in sl.edges if kd == "odom"])
-            self.g_loop.set_segments([[tuple(sl.kfs[i].pose[:2]), tuple(sl.kfs[j].pose[:2])] for i, j, m, kd in sl.edges if kd == "loop"])
+            loops = [e for e in sl.edges if e[3] == "loop"]
+            for idx in range(len(loops)):
+                self.loop_seen.setdefault(idx, self.n_frames)
+            self.g_loop.set_segments([[tuple(sl.kfs[e[0]].pose[:2]), tuple(sl.kfs[e[1]].pose[:2])] for idx, e in enumerate(loops)
+                                      if self.n_frames - self.loop_seen[idx] <= 12])
             if sl.loops_accepted > self.last_loops:
                 self.last_loops = sl.loops_accepted
                 ev = sl.events[-1]
@@ -220,12 +225,99 @@ class RightPanel:
         plt.close(self.fig)
 
 
+def _dilate1(m):
+    a = m.copy()
+    a[1:, :] |= m[:-1, :]; a[:-1, :] |= m[1:, :]
+    b = a.copy()
+    b[:, 1:] |= a[:, :-1]; b[:, :-1] |= a[:, 1:]
+    return b
+
+
+def _wall_match(est_grid, ref_grid):
+    """F1 of the occupied cells of a map against the reference map (same scans, exact pose), one cell of tolerance."""
+    e, r = est_grid.grid == OCCUPIED, ref_grid.grid == OCCUPIED
+    prec = (e & _dilate1(r)).sum() / max(int(e.sum()), 1)
+    rec = (r & _dilate1(e)).sum() / max(int(r.sum()), 1)
+    return 2 * prec * rec / (prec + rec) if prec + rec > 0 else 0.0
+
+
+class ComparePanel:
+    """One map of the side-by-side comparison, built from the SAME flight, the SAME noisy measurements and the SAME scans.
+    kind 'odom': pure dead reckoning (what the drone would believe with the odometer alone). kind 'slam': scan matching + loop closure,
+    the estimate the drone actually flies with. Black = true walls, green = true path, red = estimated path."""
+
+    def __init__(self, env, size, kind):
+        g = env.grid
+        self.kind = kind
+        self.fig = plt.figure(figsize=(size / 100, size / 100), dpi=100)
+        self.ax = self.fig.add_axes([0.03, 0.06, 0.94, 0.80])
+        ext = [g.x_min, g.x_max, g.y_min, g.y_max]
+        self.img = self.ax.imshow(RightPanel._rgb(g), origin="lower", extent=ext, interpolation="nearest")
+        h, w = g.grid.shape
+        self.true_img = self.ax.imshow(np.zeros((h, w, 4), dtype=np.uint8), origin="lower", extent=ext, interpolation="nearest", zorder=2)
+        self.path_true, = self.ax.plot([], [], color="#0b6e2e", lw=2.4, zorder=5)
+        self.path_est, = self.ax.plot([], [], color="#d62828", lw=2.4, zorder=5)
+        self.true_marker, = self.ax.plot([], [], marker="o", color="#0b6e2e", ms=10, mec="white", ls="", zorder=9)
+        self.est_marker, = self.ax.plot([], [], marker="o", color="black", ms=9, ls="", zorder=8)
+        self.xy_true, self.xy_est = [], []
+        self.n_frames, self.last_loops, self.flash_until = 0, 0, -1
+        if kind == "slam":
+            self.nodes, = self.ax.plot([], [], marker="o", color="#222222", ms=3.0, ls="", zorder=6)
+            self.flash = self.ax.text(0.5, 0.985, "", transform=self.ax.transAxes, ha="center", va="top", fontsize=12, weight="bold", color="white",
+                                      bbox=dict(facecolor="#d62828", alpha=0.92, edgecolor="none", pad=4), zorder=20)
+        self.ax.set_aspect("equal")
+        self.ax.set_xlim(g.x_min, g.x_max)
+        self.ax.set_ylim(g.y_min, g.y_max)
+        self.ax.set_xticks([]); self.ax.set_yticks([])
+        self.fig.text(0.5, 0.965, "Odometry only (no correction)" if kind == "odom" else "SLAM: scan matching + loop closure",
+                      ha="center", va="center", fontsize=15, weight="bold", color="#b00020" if kind == "odom" else "#0b6e2e")
+        self.stat_text = self.fig.text(0.5, 0.905, "", ha="center", va="center", fontsize=12, weight="bold")
+        self.fig.text(0.5, 0.025, "black: true walls | green: true path | red: estimated path", ha="center", va="center", fontsize=9.5)
+
+    def frame(self, env, coverage):
+        grid = env.shadow_grid if self.kind == "odom" else env.est_grid
+        est = (env._shadow if self.kind == "odom" else env._odom).pose
+        errs = env.shadow_err if self.kind == "odom" else env.pose_err
+        self.img.set_data(RightPanel._rgb(grid))
+        occ = env.grid.grid == OCCUPIED
+        rgba = np.zeros(occ.shape + (4,), dtype=np.uint8)
+        rgba[occ] = (0, 0, 0, 215)
+        self.true_img.set_data(rgba)
+        pos = env.data.body("drone_body").xpos[:2]
+        self.xy_true.append((pos[0], pos[1])); self.xy_est.append((est[0], est[1]))
+        self.path_true.set_data([p[0] for p in self.xy_true], [p[1] for p in self.xy_true])
+        self.path_est.set_data([p[0] for p in self.xy_est], [p[1] for p in self.xy_est])
+        self.true_marker.set_data([pos[0]], [pos[1]])
+        self.est_marker.set_data([est[0]], [est[1]])
+        self.n_frames += 1
+        if self.kind == "slam":
+            sl = env._slam
+            pts = np.array([k.pose[:2] for k in sl.kfs]) if sl.kfs else np.zeros((0, 2))
+            self.nodes.set_data(pts[:, 0], pts[:, 1])
+            if sl.loops_accepted > self.last_loops:
+                self.last_loops = sl.loops_accepted
+                if sl.events[-1]["max_shift"] > 0.02:
+                    self.flash_until = self.n_frames + 8
+                    self.flash.set_text(f"Loop closure #{sl.loops_accepted}: map rebuilt")
+            if self.n_frames > self.flash_until:
+                self.flash.set_text("")
+        self.stat_text.set_text(f"position error {(errs[-1] if errs else 0.0):.2f} m   |   walls match {_wall_match(grid, env.grid):.2f}"
+                                f"   |   coverage {coverage * 100:.0f}%")
+        self.fig.canvas.draw()
+        return np.asarray(self.fig.canvas.buffer_rgba())[..., :3].copy()
+
+    def close(self):
+        plt.close(self.fig)
+
+
 def video_kw():
     """Réglages propres à la vidéo : vitesse de rotation du nez ; et, par défaut, PAS d'arrêt à 90 % (cible inatteignable) : l'épisode ne finit que
     quand le drone ne découvre plus aucune case pendant OPT['stag'] pas (ou collision, ou 6000 pas). Aucun effet sur les entrées du réseau."""
     kw = dict(yaw_follow_rate=OPT["yaw_rate"], yaw_follow_min_speed=OPT["yaw_min_speed"])
     if OPT["pose_source"] != "oracle":
         kw.update(pose_source=OPT["pose_source"], odom_noise=OPT["odom_noise"])
+    if OPT["compare"]:
+        kw.update(shadow_odom=True)
     if OPT["full"]:
         kw.update(coverage_target=1.01, stagnation_start=0, stagnation_limit=OPT["stag"], max_steps=6000)
     return kw
@@ -285,17 +377,33 @@ def run(level, seed, policy, model_name, out_dir, stride, fps, size, azimuth, gi
                 break
         res, cov = outcome(env, term, trunc, idle >= 25 and t > 200)
         print(f"niveau {level} seed {seed} [{policy}] : {res:9s} {t + 1:5d} pas ({(t + 1) * 0.02:5.1f} s) couverture {cov * 100:.1f} %"
-              + (f" | erreur finale {(env.pose_err[-1] if env.pose_err else 0.0):.2f} m, max {max(env.pose_err):.2f} m" if env._odom is not None else ""))
+              + (f" | erreur finale {(env.pose_err[-1] if env.pose_err else 0.0):.2f} m, max {max(env.pose_err):.2f} m" if env._odom is not None else "")
+              + (f" | MÊME vol, odométrie seule : finale {env.shadow_err[-1]:.2f} m, max {max(env.shadow_err):.2f} m" if env._shadow is not None and env.shadow_err else ""))
         return res, t + 1
-    left, right = LeftPanel(env, size, azimuth, OPT["view"]), RightPanel(env, size)
+    if OPT["compare"]:
+        left, right = ComparePanel(env, size, "odom"), ComparePanel(env, size, "slam")
+    else:
+        left, right = LeftPanel(env, size, azimuth, OPT["view"]), RightPanel(env, size)
     font, small = make_font(26), make_font(20)
-    name = f"demo_{policy}_niveau{level}_seed{seed}" + (f"_{OPT['pose_source']}_{OPT['odom_noise']}" if OPT["pose_source"] != "oracle" else "") + ("_3d" if OPT["view"] == "follow" else "") + (f"_lacet{OPT['yaw_rate']:g}" if OPT["yaw_rate"] != 1.2 else "") + ("_90pct" if not OPT["full"] else "")
+    name = (f"demo_compare_niveau{level}_seed{seed}_{OPT['odom_noise']}" if OPT["compare"] else
+            f"demo_{policy}_niveau{level}_seed{seed}" + (f"_{OPT['pose_source']}_{OPT['odom_noise']}" if OPT["pose_source"] != "oracle" else ""))
+    name = name + ("_3d" if OPT["view"] == "follow" else "") + (f"_lacet{OPT['yaw_rate']:g}" if OPT["yaw_rate"] != 1.2 else "") + ("_90pct" if not OPT["full"] else "")
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, name + ".mp4")
     writer = imageio.get_writer(path, fps=fps, codec="libx264", quality=8, pixelformat="yuv420p", macro_block_size=16)
     gif_frames = []
 
     def grab(t, banner=None):
+        if OPT["compare"]:
+            cov_now = env.grid.coverage_ratio()
+            frame = np.concatenate([left.frame(env, cov_now), right.frame(env, cov_now)], axis=1)
+            if banner:
+                img = Image.fromarray(frame)
+                d = ImageDraw.Draw(img)
+                d.rectangle([0, frame.shape[0] - 54, frame.shape[1], frame.shape[0]], fill=(20, 20, 20))
+                d.text((12, frame.shape[0] - 46), banner, fill=(255, 255, 255), font=font)
+                frame = np.asarray(img)
+            return frame
         a = left.frame(env)
         b = right.frame(env, env.grid.coverage_ratio())
         img = Image.fromarray(a)
@@ -314,7 +422,7 @@ def run(level, seed, policy, model_name, out_dir, stride, fps, size, azimuth, gi
         if gif:
             gif_frames.append(Image.fromarray(frame).resize((frame.shape[1] // 2, frame.shape[0] // 2), Image.LANCZOS))
 
-    first = grab(0, (f"Level {level}, seed {seed}: " + {"odom": "odometry only", "slam": "scan matching", "slam_lc": "scan matching + loop closure"}[OPT["pose_source"]] + f" ({OPT['odom_noise']} noise)") if OPT["pose_source"] != "oracle" else f"niveau {level} - seed {seed} - {'expert scripté' if policy == 'expert' else 'clone appris'}")
+    first = grab(0, f"Level {level}, seed {seed}: same flight, same measurements, same scans ({OPT['odom_noise']} noise)" if OPT["compare"] else (f"Level {level}, seed {seed}: " + {"odom": "odometry only", "slam": "scan matching", "slam_lc": "scan matching + loop closure"}[OPT["pose_source"]] + f" ({OPT['odom_noise']} noise)") if OPT["pose_source"] != "oracle" else f"niveau {level} - seed {seed} - {'expert scripté' if policy == 'expert' else 'clone appris'}")
     emit(first, fps)
     t, idle = 0, 0
     for t in range(env.max_steps):
@@ -362,8 +470,11 @@ if __name__ == "__main__":
     ap.add_argument("--pose-source", choices=["oracle", "odom", "slam", "slam_lc"], default="oracle",
                     help="oracle: exact pose; odom: dead reckoning; slam: + scan matching; slam_lc: + loop closure and map reconstruction.")
     ap.add_argument("--odom-noise", choices=["low", "medium", "high", "extreme"], default="medium", help="Noise level of the odometry (not used with oracle).")
+    ap.add_argument("--compare", action="store_true", help="Side by side, same flight: odometry only (left) against scan matching + loop closure (right).")
     a = ap.parse_args()
-    OPT.update(pose_source=a.pose_source, odom_noise=a.odom_noise, full=not a.stop_at_target, stag=a.stag, yaw_rate=a.yaw_rate, yaw_min_speed=a.yaw_min_speed, view=a.view)
+    if a.compare:
+        a.pose_source = "slam_lc"
+    OPT.update(compare=a.compare, pose_source=a.pose_source, odom_noise=a.odom_noise, full=not a.stop_at_target, stag=a.stag, yaw_rate=a.yaw_rate, yaw_min_speed=a.yaw_min_speed, view=a.view)
     seeds = list(range(*a.seed_range)) if a.seed_range else a.seeds
     for s in seeds:
         run(a.level, s, a.policy, a.model, a.out, a.stride, a.fps, a.size, a.azimuth, a.gif, a.list)

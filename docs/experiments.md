@@ -128,8 +128,7 @@ Boucles :
 Coût : appariement 6,3 ms par scan en moyenne ; back-end 7,6 ms par keyframe (31 ms au bruit extrême, reconstructions de carte comprises). Temps de calcul total d'un pas simulé : 9 à 11 ms avec scan-matching,
 11 à 22 ms avec boucle (contre 3 à 6 ms pour la simulation seule), mesuré avec 8 vols en parallèle sur un PC de bureau, Python non optimisé : sous le budget de 20 ms d'un pas à 50 Hz dans ces mesures ; non vérifié sur une machine embarquée.
 
-Démonstrations : `python src/make_demo.py --pose-source odom|slam|slam_lc --odom-noise extreme --level 3 --seeds 9008 --gif` (carte estimée en direct, vrais murs en noir, vrai chemin contre chemin estimé, graphe de poses,
-bandeau à chaque fermeture de boucle). Niveau 3, seed 9008, bruit extrême : odométrie seule = collision à 2,70 m d'erreur et 22° de cap ; scan-matching + boucle = succès à 0,22 m.
+Démonstrations : `python src/make_demo.py --compare --odom-noise high --level 3 --seeds 9002 --stride 10 --gif` (voir la section « Comparaison sur le même vol » ci-dessous). Les premiers gifs à bruit extrême (niveau 3, seed 9008) ont été retirés : trop chargés, et l'odométrie seule et le SLAM n'y avaient ni la même trajectoire ni la même mesure, donc pas comparables à l'oeil.
 
 Non vérifié / limites : LiDAR sans bruit ; position de départ connue ; bruits choisis à la main (non calibrés) ; 2D à altitude fixe ; 20 maisons par case (±10 points) ; la détection de frontières utilise encore le masque réel du bâtiment (effet négligeable mesuré plus tôt) ;
 une seule fausse boucle observée (1 sur 688) : trop peu pour estimer un taux ; maisons aux pièces très semblables non testées spécifiquement.
@@ -193,3 +192,36 @@ les drones en timeout sont presque immobiles (0,3 à 0,5 m sur les 300 derniers 
 
 Expert : suit la direction du premier pas du chemin BFS, ralentit près des murs, s'écarte des murs à moins de 0,8 m ; il décide avec les mêmes entrées que le réseau. Le clone (80 157 échantillons, 210 maisons) copie ce script et reçoit sa direction BFS en entrée :
 ce n'est pas un résultat de RL de bout en bout. Sans le plan réel du bâtiment dans la détection de frontières, l'expert fait 95 % (niveau 3) et 90 % (niveau 4) : effet négligeable.
+
+
+## Comparaison sur le même vol (vidéos `demo/demo_compare_*`)
+
+Problème des premières démos : maison, bruit et trajectoire différaient entre « odométrie seule » et « SLAM » (le drone suit sa propre carte, donc deux estimateurs donnent deux trajets). Correction : un SEUL vol, piloté par le SLAM
+(scan-matching + fermeture de boucle), et, en parallèle, une pose et une carte « odométrie seule » calculées sur exactement les mêmes mesures bruitées et les mêmes scans (`shadow_odom=True` dans `ExplorerEnv`, option `--compare` de `make_demo.py`).
+Le « fantôme » ne sert à aucune décision. Les vols SLAM sont identiques à la mesure de la GATE 3 (12 vols vérifiés sur 12).
+
+Vols testés (bruit fort, lacet réaliste, exploration poursuivie jusqu'à plus de frontière ; ce n'est donc pas le même protocole que les tableaux des GATES, qui s'arrêtent à 90 %) :
+
+| niveau | seed | couverture vraie | erreur finale SLAM (max) | erreur finale odométrie seule, même vol (max) |
+|---|---|---|---|---|
+| 3 | 9000 | 98,1 % | 0,32 m (0,45) | 1,66 m (1,78) |
+| 3 | 9001 | 87,1 % | 0,07 m (0,18) | 1,25 m (1,25) |
+| 3 | **9002** | 97,6 % | 0,18 m (0,26) | 2,81 m (3,65) |
+| 3 | 9003 | 91,3 % | 0,15 m (0,38) | 0,97 m (1,48) |
+| 3 | 9004 | 98,4 % | 0,11 m (0,27) | 1,95 m (2,75) |
+| 3 | 9005 | 98,4 % | 0,15 m (0,18) | 0,39 m (1,06) |
+| 3 | 9006 | 28,7 % | 0,08 m (0,17) | 1,18 m (1,18) |
+| 3 | 9007 | 98,2 % | 0,22 m (0,22) | 0,81 m (0,81) |
+| 4 | 9000 | 100,0 % | 0,00 m (0,11) | 0,62 m (1,56) |
+| 4 | 9001 | 99,0 % | 2,03 m (2,23) | 3,60 m (3,82) |
+| 4 | 9002 | 99,2 % | 0,26 m (0,45) | 1,19 m (3,42) |
+| 4 | 9003 | 59,7 % | 0,18 m (0,23) | 2,82 m (2,83) |
+| 4 | **9004** | 95,7 % | 0,29 m (0,33) | 2,61 m (2,65) |
+| 4 | 9005 | 99,2 % | 0,12 m (0,27) | 0,70 m (1,09) |
+| 4 | 9006 | 100,0 % | 0,23 m (0,45) | 2,80 m (5,69) |
+| 4 | 9007 | 99,4 % | 0,09 m (0,13) | 0,56 m (0,72) |
+
+- Sur ces 16 vols, l'erreur finale du SLAM est inférieure à celle de l'odométrie seule dans les 16 cas ; elle est de 0,2 m ou moins dans 10 cas sur 16.
+- Une exception notable : niveau 4, seed 9001, le SLAM dérive à son tour (2,03 m) : cas non expliqué.
+- Les seeds 9006 (niveau 3, couverture 28,7 %) et 9003 (niveau 4, 59,7 %) sont des vols où l'exploration s'est arrêtée très tôt (critère de fin : plus aucune frontière valide) : problème de planification, pas de localisation ; non étudié.
+- Les deux vidéos retenues (en gras) ont été choisies pour le contraste ; l'erreur RMSE médiane du SLAM au bruit fort est de 0,12 m (mesure des GATES 2 et 3).

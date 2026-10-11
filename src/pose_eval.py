@@ -26,7 +26,7 @@ from occupancy_grid import OCCUPIED                                 # noqa: E402
 
 FIELDS = ["level", "noise", "pose_source", "seed", "outcome", "steps", "true_coverage", "path_m", "pose_rmse_m", "pose_max_m",
           "pose_final_m", "yaw_rmse_deg", "yaw_final_deg", "drift_pct", "map_f1", "map_precision", "map_recall", "ms_per_step", "match_ms", "corrected_pct", "keyframes", "loops", "loops_false", "loops_rejected",
-          "loop_err_before_m", "loop_err_after_m", "backend_ms"]
+          "loop_err_before_m", "loop_err_after_m", "backend_ms", "odom_only_rmse_m", "odom_only_max_m", "odom_only_yaw_rmse_deg", "odom_only_map_f1"]
 
 
 def _dilate(m, r=1):
@@ -53,7 +53,7 @@ def run_episode(task):
     kw = dict(EXPERT_ENV_KW)
     kw.update(house_level=level, obs_keys=["proximity_rays", "frontier_vector", "velocity"], max_steps=5000)
     if noise != "none":
-        kw.update(pose_source=pose_source, odom_noise=noise)
+        kw.update(pose_source=pose_source, odom_noise=noise, shadow_odom=pose_source in ("slam", "slam_lc"))
     env = ExplorerEnv(seed=seed, **kw)
     obs, _ = env.reset(seed=seed)
     t0 = time.perf_counter()
@@ -84,6 +84,10 @@ def run_episode(task):
         if sl.events:
             row["loop_err_before_m"] = round(float(np.mean([ev["err_before"] for ev in sl.events])), 3)
             row["loop_err_after_m"] = round(float(np.mean([ev["err_after"] for ev in sl.events])), 3)
+    if env._shadow is not None and env.shadow_err:
+        se, sy = np.array(env.shadow_err), np.degrees(np.array(env.shadow_yaw_err))
+        row.update(odom_only_rmse_m=round(float(np.sqrt(np.mean(se ** 2))), 3), odom_only_max_m=round(float(se.max()), 3),
+                   odom_only_yaw_rmse_deg=round(float(np.sqrt(np.mean(sy ** 2))), 2), odom_only_map_f1=round(map_f1(env.shadow_grid, env.grid)[0], 3))
     env.close()
     return row
 

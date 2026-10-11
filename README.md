@@ -74,16 +74,18 @@ Full tables, version history and measurements (in French): [docs/experiments.md]
 Everything above uses the exact pose given by the simulator. This part removes it. The drone only gets noisy velocity and yaw-rate measurements, like an odometer and a gyro, and has to build its map and localise itself from the LiDAR. No machine learning, no training.
 
 <p align="center">
-  <img src="demo/demo_expert_niveau3_seed9008_odom_extreme.gif" width="760">
+  <img src="demo/demo_compare_niveau3_seed9002_high.gif" width="760">
 </p>
 
-*Odometry only (extreme noise): the errors add up, the map is smeared (ghost walls), the planner is misled and the drone crashes.*
+*Level 3 house, one flight, same noisy measurements and same LiDAR scans. Left: odometry only, the errors add up, rooms appear twice and the position ends 2.7 m off. Right: scan matching + loop closure, the map stays on the true walls (black) and the estimated path (red) follows the true one (green).*
 
 <p align="center">
-  <img src="demo/demo_expert_niveau3_seed9008_slam_lc_extreme.gif" width="760">
+  <img src="demo/demo_compare_niveau4_seed9004_high.gif" width="760">
 </p>
 
-*Same house, same noise, with SLAM: the estimated path (red) follows the true one (green), the map stays on the true walls (black), and loop closures (thick red) rebuild the map.*
+*Level 4 house, same comparison: 2.4 m of error with odometry only, 0.3 m with SLAM.*
+
+The SLAM estimate is the one that flies the drone; the odometry-only map is computed in parallel from the same data, so the only difference between the two sides is the estimator. These two flights were picked among 16 (levels 3 and 4, high noise) for a clear contrast; the median SLAM position error (RMSE over the flight) at high noise is 0.12 m.
 
 - **Odometry:** speed and yaw rate with a scale error, a constant bias and white noise (levels low / medium / high / extreme, chosen by hand, not calibrated on a real sensor). The estimate drifts.
 - **Scan matching:** each LiDAR scan is aligned on the map built so far by testing small corrections of x, y and heading and keeping the one where the scan points fall best on the known walls.
@@ -125,7 +127,7 @@ pip install -r requirements_runner.txt imageio imageio-ffmpeg
 
 # SLAM measurements (levels 1-4, 20 houses) and demo
 python src/pose_eval.py --levels 1 2 3 4 --noise low medium high --pose-source slam_lc
-python src/make_demo.py --pose-source slam_lc --odom-noise extreme --level 3 --seeds 9008 --stride 8 --gif --out demo
+python src/make_demo.py --compare --odom-noise high --level 3 --seeds 9002 --stride 10 --gif --out demo
 
 # demo gifs
 python src/make_demo.py --level 2 --seeds 9002 --stride 4 --gif --out demo

@@ -31,16 +31,24 @@ class DeadReckoning:
         self.w_bias = rng.normal(0.0, p["w_bias"])
         self.pose = np.array([x, y, yaw], dtype=np.float64)
 
-    def step(self, v_body, yaw_rate, dt):
-        """v_body: true velocity in the body frame (2,), yaw_rate: true yaw rate. The noise is added here, the true values never leave."""
+    def measure(self, v_body, yaw_rate):
+        """Noisy measurement of the body-frame velocity (2,) and of the yaw rate, from the true values (which never leave this method)."""
         p = self.p
         v = (1.0 + self.scale) * np.asarray(v_body) + self.v_bias + self.rng.normal(0.0, p["v_noise"], 2)
         w = yaw_rate + self.w_bias + self.rng.normal(0.0, p["w_noise"])
+        return v, w
+
+    def integrate(self, v, w, dt):
+        """Dead reckoning step: move the pose by the measured velocity and rotation."""
         self.pose[2] += w * dt
         c, s = np.cos(self.pose[2]), np.sin(self.pose[2])
         self.pose[0] += (c * v[0] - s * v[1]) * dt
         self.pose[1] += (s * v[0] + c * v[1]) * dt
         return self.pose
+
+    def step(self, v_body, yaw_rate, dt):
+        v, w = self.measure(v_body, yaw_rate)
+        return self.integrate(v, w, dt)
 
 
 def _dilate3(m):
