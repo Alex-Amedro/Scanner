@@ -239,3 +239,10 @@ logs_tmp/
 
 # Les mp4 de make_demo.py restent locaux (non lisibles dans la page GitHub) : seuls les gifs de demo/ sont versionnés
 demo/*.mp4
+
+# Le journal du travail SLAM est versionné
+!docs/experiments.md
+
+# Journaux d execution des mesures SLAM (les csv sont versionnes)
+docs/results/*_log.txt
+docs/results/gate3_done.txt

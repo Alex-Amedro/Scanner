@@ -23,6 +23,8 @@ from gymnasium import spaces
 
 from building_generator import compute_navigable_rects, generate_building_xml, generate_layout
 from house_generator import generate_house, generate_house_xml
+from pose_estimation import DeadReckoning, ScanMatchedPose
+from slam_backend import PoseGraphSlam
 
 from occupancy_grid import OccupancyGrid
 
@@ -141,6 +143,7 @@ class ExplorerEnv(gym.Env):
                  no_yaw=False, action_mode="velocity", start_outside=False, drag=0.0, coeff_action_rate=0.0, coeff_tilt_rate=0.0, ref_accel_limit=0.0, direct_tau=0.15, direct_a_max=12.0, action_deadzone=0.0,
                  yaw_follow=False, yaw_follow_rate=1.5, yaw_follow_min_speed=0.8, yaw_follow_offset=-np.pi / 2,
                  building="chain", house_level=2, crop_cell=None, frontier_mode="euclid", bfs_clearance_m=0.30,
+                 pose_source="oracle", odom_noise="medium",
                  stagnation_start=0, stagnation_penalty=0.1, stagnation_limit=0,
 
                  max_steps=2000, seed=None, **obsolete):
@@ -264,6 +267,16 @@ class ExplorerEnv(gym.Env):
         assert frontier_mode in ("euclid", "bfs"), frontier_mode
         self.frontier_mode = frontier_mode       # euclid : à vol d'oiseau (historique) ; bfs : par distance de chemin sur la carte du drone
         self.bfs_clearance_m = bfs_clearance_m   # le chemin BFS reste à au moins cette distance des murs
+        # pose_source : "oracle" = exact pose from the simulator (historical behaviour) ; "odom" = pose by dead reckoning from noisy
+        # velocity / yaw-rate measurements, no correction. With "odom" the occupancy grid used for planning (est_grid) is built from the
+        # ESTIMATED pose ; self.grid (built from the true pose) is kept only to measure coverage and success. The PID keeps using the true state.
+        assert pose_source in ("oracle", "odom", "slam", "slam_lc"), pose_source
+        self.pose_source = pose_source
+        self.odom_noise = odom_noise
+        self.est_grid = None
+        self._odom = None
+        self._slam = None
+        self.pose_err, self.yaw_err, self.path_length = [], [], 0.0
         self.crop_cell = crop_cell   # côté (m) d'une case du crop de carte ; None = résolution de la grille
         # Stagnation (0 = désactivé) : après `stagnation_start` pas SANS découvrir aucune case, pénalité de `stagnation_penalty`
         # par pas ; après `stagnation_limit` pas, l'épisode est interrompu (comme un timeout). Les deux bornes empêchent que
@@ -495,6 +508,18 @@ class ExplorerEnv(gym.Env):
 
         self.grid.set_reachable_mask(compute_navigable_rects(self.layout))
 
+        self.est_grid, self._odom, self._slam = None, None, None
+        self.pose_err, self.yaw_err, self.path_length = [], [], 0.0
+        if self.pose_source != "oracle":
+            self.est_grid = OccupancyGrid(self.layout.world_x_range, self.layout.world_y_range, resolution=self.grid_resolution)
+            self.est_grid.set_reachable_mask(compute_navigable_rects(self.layout))
+            p0 = self.data.body("drone_body").xpos
+            self._true_yaw_prev = _quat_to_yaw(self.data.body("drone_body").xquat)
+            self._true_xy_prev = np.array([p0[0], p0[1]])
+            cls = ScanMatchedPose if self.pose_source in ("slam", "slam_lc") else DeadReckoning
+            self._slam = PoseGraphSlam() if self.pose_source == "slam_lc" else None
+            self._odom = cls(self.odom_noise, np.random.default_rng(self._rng.getrandbits(32)), p0[0], p0[1], self._true_yaw_prev)
+
         self._corridor_rects = (self.layout.corridor_rects if self.building == "house"
                                 else compute_navigable_rects(self.layout)[len(self.layout.rooms):])
 
@@ -517,6 +542,35 @@ class ExplorerEnv(gym.Env):
         return obs, {}
 
 
+
+    def _update_odometry(self):
+        """Dead reckoning: integrate noisy measurements built from the true motion (the true values stay inside this method)."""
+        if self._odom is None:
+            return
+        d = self.data
+        p = d.body("drone_body").xpos
+        yaw = _quat_to_yaw(d.body("drone_body").xquat)
+        dt = self._dt_sub * self.substeps
+        c, s = np.cos(yaw), np.sin(yaw)
+        vw = d.qvel[0:2]
+        v_body = np.array([c * vw[0] + s * vw[1], -s * vw[0] + c * vw[1]])
+        yaw_rate = ((yaw - self._true_yaw_prev + np.pi) % (2 * np.pi) - np.pi) / dt
+        self._true_yaw_prev = yaw
+        est = self._odom.step(v_body, yaw_rate, dt)
+        self.pose_err.append(float(np.hypot(est[0] - p[0], est[1] - p[1])))
+        self.yaw_err.append(float((est[2] - yaw + np.pi) % (2 * np.pi) - np.pi))
+        xy = np.array([p[0], p[1]])
+        self.path_length += float(np.linalg.norm(xy - self._true_xy_prev))
+        self._true_xy_prev = xy
+
+    def _plan_state(self, yaw):
+        """(grid, x, y, yaw) used for planning and for the map input: the true ones in oracle mode, the estimated ones otherwise."""
+        if self._odom is None:
+            p = self.data.body("drone_body").xpos
+            return self.grid, p[0], p[1], yaw
+        ex, ey, eyaw = self._odom.pose
+        dpsi = eyaw - _quat_to_yaw(self.data.body("drone_body").xquat)
+        return self.est_grid, ex, ey, yaw + (0.0 if self.yaw_follow else dpsi)
 
     def _obs_yaw(self):
         """Cap utilisé pour tout ce que VOIT ou COMMANDE le réseau (repère des actions, rayons, frontières, crop).
@@ -691,6 +745,8 @@ class ExplorerEnv(gym.Env):
             mujoco.mj_step(self.model, self.data)
             if self.data.ncon > 0:  # contact en cours de route : ne pas laisser un rebond l'effacer
                 break
+
+        self._update_odometry()
 
         self._scan_and_update_grid()
 
@@ -877,6 +933,11 @@ class ExplorerEnv(gym.Env):
 
         }
 
+        if self._odom is not None:
+            info["pose_err"] = self.pose_err[-1]
+            info["yaw_err_deg"] = float(np.degrees(self.yaw_err[-1]))
+            info["path_length"] = self.path_length
+
         return obs, float(reward), terminated, truncated, info
 
 
@@ -896,7 +957,7 @@ class ExplorerEnv(gym.Env):
             self.viewer.close()
             self.viewer = None
         self._viewer_model = None
-        self.model = self.data = self.grid = None
+        self.model = self.data = self.grid = self.est_grid = None
 
     def _in_corridor(self, x, y):
 
@@ -928,6 +989,9 @@ class ExplorerEnv(gym.Env):
 
         origin_xy = (pos[0], pos[1])
 
+        true_yaw = _quat_to_yaw(quat)
+        scan_b, scan_d, scan_h = [], [], []    # the scan as the sensor delivers it: angle in the body frame, range, hit flag
+
 
 
         self._last_lidar_origin = pos.copy()
@@ -956,11 +1020,32 @@ class ExplorerEnv(gym.Env):
 
             self.grid.update_ray(origin_xy, hit_xy, hit)
 
+            scan_b.append(a - true_yaw)
+            scan_d.append(dist)
+            scan_h.append(bool(hit))
+
             self._last_lidar_dirs.append(vec)
 
             self._last_lidar_dists.append(dist)
 
 
+
+        if self._odom is not None:
+            # place the scan on the estimated map, from the estimated pose (corrected first when the pose source is "slam")
+            b, d, h = np.array(scan_b), np.array(scan_d), np.array(scan_h)
+            if self.pose_source in ("slam", "slam_lc"):
+                keep = h & (d < 12.0)
+                self._odom.correct(np.stack([d[keep] * np.cos(b[keep]), d[keep] * np.sin(b[keep])], axis=1), self.est_grid)
+            ex, ey, eyaw = self._odom.pose
+            ea = b + eyaw
+            ex_end, ey_end = ex + np.cos(ea) * d, ey + np.sin(ea) * d
+            for i in range(len(d)):
+                self.est_grid.update_ray((ex, ey), (ex_end[i], ey_end[i]), h[i])
+            if self._slam is not None:
+                tp = self.data.body("drone_body").xpos
+                corrected = self._slam.process(self._odom.pose, b, d, h, (tp[0], tp[1], true_yaw), self.est_grid)
+                if corrected is not None:
+                    self._odom.pose[:] = corrected
 
         # éventail de rayons inclinés (relief) — remplace les 2 rayons verticaux
 
@@ -1024,11 +1109,12 @@ class ExplorerEnv(gym.Env):
 
 
 
+        pg, px, py, pyaw = self._plan_state(yaw)
         if self.frontier_mode == "bfs":
-            self._last_frontiers = self.grid.frontier_features_bfs(pos[0], pos[1], yaw, k=self.k_frontiers, clearance_m=self.bfs_clearance_m)
+            self._last_frontiers = pg.frontier_features_bfs(px, py, pyaw, k=self.k_frontiers, clearance_m=self.bfs_clearance_m)
         else:
-            self._last_frontiers = self.grid.frontier_features(
-                pos[0], pos[1], yaw, k=self.k_frontiers)
+            self._last_frontiers = pg.frontier_features(
+                px, py, pyaw, k=self.k_frontiers)
 
 
 
@@ -1050,11 +1136,13 @@ class ExplorerEnv(gym.Env):
         if "local_crop" not in self.obs_keys:
             local_crop = np.zeros((1,), dtype=np.float32)  # non utilisé : on évite le calcul du crop
         elif self.ego_crop:
-            local_crop = self.grid.local_crop_onehot_ego(pos[0], pos[1], yaw, self.crop_size, cell=self.crop_cell)
+            pg, px, py, pyaw = self._plan_state(yaw)
+            local_crop = pg.local_crop_onehot_ego(px, py, pyaw, self.crop_size, cell=self.crop_cell)
         else:
-            local_crop = self.grid.local_crop_onehot(pos[0], pos[1], self.crop_size)
+            pg, px, py, pyaw = self._plan_state(yaw)
+            local_crop = pg.local_crop_onehot(px, py, self.crop_size)
 
-        coverage = np.array([self.grid.coverage_ratio()], dtype=np.float32)
+        coverage = np.array([self._plan_state(yaw)[0].coverage_ratio()], dtype=np.float32)
 
 
 

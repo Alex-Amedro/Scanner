@@ -24,6 +24,7 @@ Level 1 is a small house (3-4 rooms), level 4 a large one (8-10 rooms, loops, do
 - **Smooth commands:** a smoothness regulariser (CAPS) makes commands 4x smoother and reaches 100% success on the chain buildings.
 - **Procedural houses:** 4 difficulty levels, 1,200 generated plans checked for physical accessibility by a drone of real size.
 - **Negative result, measured:** pure end-to-end RL reaches at best 27% on level 1 houses (see [Research finding](#research-finding-pure-rl-on-houses)).
+- **SLAM:** the exact pose is replaced by an estimate (noisy odometry + scan matching + loop closure, no learning): position error 0.1-0.3 m and success within the noise of the exact-pose results (see [Pose estimation](#pose-estimation-2d-lidar-slam)).
 
 ## More demos
 
@@ -66,12 +67,54 @@ The initial goal was to learn exploration end to end with RL. It works on simple
 
 The straight-line direction to the nearest frontier crosses a wall in 80-99% of the steps, but replacing it with a BFS path did not fix the success rate. No cause is isolated. Exploration noise inside doors with +-0.5 m clearance is the most likely one.
 
-Full tables, version history and measurements: [docs/experiments.md](docs/experiments.md).
+Full tables, version history and measurements (in French): [docs/experiments.md](docs/experiments.md).
+
+## Pose estimation: 2D LiDAR SLAM
+
+Everything above uses the exact pose given by the simulator. This part removes it. The drone only gets noisy velocity and yaw-rate measurements, like an odometer and a gyro, and has to build its map and localise itself from the LiDAR. No machine learning, no training.
+
+<p align="center">
+  <img src="demo/demo_expert_niveau3_seed9008_odom_extreme.gif" width="760">
+</p>
+
+*Odometry only (extreme noise): the errors add up, the map is smeared (ghost walls), the planner is misled and the drone crashes.*
+
+<p align="center">
+  <img src="demo/demo_expert_niveau3_seed9008_slam_lc_extreme.gif" width="760">
+</p>
+
+*Same house, same noise, with SLAM: the estimated path (red) follows the true one (green), the map stays on the true walls (black), and loop closures (thick red) rebuild the map.*
+
+- **Odometry:** speed and yaw rate with a scale error, a constant bias and white noise (levels low / medium / high / extreme, chosen by hand, not calibrated on a real sensor). The estimate drifts.
+- **Scan matching:** each LiDAR scan is aligned on the map built so far by testing small corrections of x, y and heading and keeping the one where the scan points fall best on the known walls.
+- **Loop closure:** keyframes (pose + scan) are stored every 0.5 m. When the drone comes back near an old keyframe, the scan is checked against a local map of the old keyframes. A pose graph is then optimised (Gauss-Newton) and the map is rebuilt from the corrected keyframes.
+
+Scripted explorer, 20 houses per cell (about +-10 points), same houses and seeds as the exact-pose results:
+
+| Success | Level 1 | Level 2 | Level 3 | Level 4 |
+|---|---|---|---|---|
+| Exact pose | 100% | 100% | 95% | 85% |
+| Odometry only, high noise | 95% | 50% | 55% | 45% |
+| Scan matching, high noise | 100% | 100% | 90% | 80% |
+| Scan matching + loop closure, high noise | 100% | 100% | 85% | 90% |
+
+| Extreme noise | Level 2 | Level 3 | Level 4 |
+|---|---|---|---|
+| Position error, odometry only | 7.3 m | 8.0 m | 7.6 m |
+| Position error, scan matching | 0.13 m | 0.48 m | 0.57 m |
+| Position error, + loop closure | 0.13 m | 0.20 m | 0.42 m |
+| Success, odometry only / scan matching / + loop closure | 35 / 100 / 100% | 20 / 80 / 90% | 15 / 80 / 80% |
+
+- Scan matching does most of the work. Loop closure changes little at low to high noise (error at closure 0.134 m before, 0.128 m after) and helps at extreme noise.
+- 499 loops accepted over 240 flights, none false (checked against the true pose). At extreme noise, 189 loops and 1 false.
+- Cost on a desktop CPU, unoptimised Python: about 6 ms per scan for matching and 8 ms per keyframe for the back end.
 
 ## Limits
 
 - The neural policy imitates the script and receives its BFS direction as an input: it does not discover where to go by itself.
-- Exact pose from the simulator (no SLAM), 2D LiDAR at a fixed altitude, one floor.
+- Exact pose from the simulator in every experiment except the SLAM one, which uses the scripted explorer only.
+- SLAM: the simulated LiDAR has no measurement noise, the start pose is known, the odometry noise is hand-picked, the PID flies with the true state (like an IMU would), and these small houses give few chances to close a loop (98 of 240 flights contain at least one).
+- 2D LiDAR at a fixed altitude, one floor.
 - Most RL runs use a single seed, with 30 evaluation houses (the expert is measured on 20 per level).
 - Mean tilt is still high (about 30 degrees).
 
@@ -79,6 +122,10 @@ Full tables, version history and measurements: [docs/experiments.md](docs/experi
 
 ```
 pip install -r requirements_runner.txt imageio imageio-ffmpeg
+
+# SLAM measurements (levels 1-4, 20 houses) and demo
+python src/pose_eval.py --levels 1 2 3 4 --noise low medium high --pose-source slam_lc
+python src/make_demo.py --pose-source slam_lc --odom-noise extreme --level 3 --seeds 9008 --stride 8 --gif --out demo
 
 # demo gifs
 python src/make_demo.py --level 2 --seeds 9002 --stride 4 --gif --out demo
@@ -105,6 +152,9 @@ Run each script with `--help` for all options.
 | `src/caps_ppo.py` | PPO with the CAPS smoothness regulariser |
 | `src/train.py`, `src/evaluate.py` | Training and evaluation |
 | `src/make_demo.py` | Split-screen demo videos |
+| `src/pose_estimation.py` | Noisy odometry and scan matching |
+| `src/slam_backend.py` | Keyframes, loop closure, pose graph, map rebuild |
+| `src/pose_eval.py` | SLAM measurements (`docs/results/*.csv`) |
 
 </details>
 

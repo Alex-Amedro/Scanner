@@ -40,7 +40,7 @@ EXPERT_KW = {"task": "explore", "gear_roll_pitch": 0.5, "gear_yaw": 0.25, "up_z_
              "obs_keys": ["proximity_rays", "frontier_vector", "velocity"], "fixed_altitude": True, "k_frontiers": 2, "no_yaw": True,
              "action_mode": "velocity", "start_outside": True, "frontier_mode": "bfs", "bfs_clearance_m": 0.45, "building": "house",
              "n_rooms": (3, 3), "max_steps": 3000}
-OPT = dict(full=True, stag=600, yaw_rate=1.2, yaw_min_speed=0.8, view="top")   # modifiées par la ligne de commande
+OPT = dict(pose_source="oracle", odom_noise="medium", full=True, stag=600, yaw_rate=1.2, yaw_min_speed=0.8, view="top")   # modifiées par la ligne de commande
 COLORS = np.array([[0x8F, 0xD1, 0x9E], [0xE0, 0x7A, 0x5F], [0xCC, 0xCC, 0xCC]], dtype=np.uint8)   # free, wall, unknown
 
 
@@ -108,6 +108,25 @@ class RightPanel:
         self.fig = plt.figure(figsize=(size / 100, size / 100), dpi=100)
         self.ax = self.fig.add_axes([0.03, 0.06, 0.94, 0.83])
         self.img = self.ax.imshow(self._rgb(g), origin="lower", extent=[g.x_min, g.x_max, g.y_min, g.y_max], interpolation="nearest")
+        self.odom = env._odom is not None      # pose estimée : on montre la carte ESTIMÉE, les vrais murs et les deux trajectoires
+        if self.odom:
+            h, w = g.grid.shape
+            self.true_img = self.ax.imshow(np.zeros((h, w, 4), dtype=np.uint8), origin="lower", extent=[g.x_min, g.x_max, g.y_min, g.y_max],
+                                           interpolation="nearest", zorder=2)
+            self.path_true, = self.ax.plot([], [], color="#0b6e2e", lw=2.4, zorder=5)
+            self.path_est, = self.ax.plot([], [], color="#d62828", lw=2.4, zorder=5)
+            self.true_marker, = self.ax.plot([], [], marker="o", color="#0b6e2e", ms=10, mec="white", ls="", zorder=9)
+            self.xy_true, self.xy_est = [], []
+        self.slam = env._slam is not None          # pose graph overlay: keyframes, odometry edges (grey), loop edges (red)
+        self.n_frames, self.last_loops, self.flash_until = 0, 0, -1
+        if self.slam:
+            self.g_odom = LineCollection([], colors="#777777", linewidths=1.0, zorder=4)
+            self.g_loop = LineCollection([], colors="#d62828", linewidths=2.2, zorder=6)
+            self.ax.add_collection(self.g_odom)
+            self.ax.add_collection(self.g_loop)
+            self.nodes, = self.ax.plot([], [], marker="o", color="#222222", ms=4, ls="", zorder=6)
+            self.flash = self.ax.text(0.5, 0.985, "", transform=self.ax.transAxes, ha="center", va="top", fontsize=12, weight="bold", color="white",
+                                      bbox=dict(facecolor="#d62828", alpha=0.92, edgecolor="none", pad=4), zorder=20)
         self.rays = LineCollection([], colors="#3d5a80", linewidths=0.4, alpha=0.45, zorder=3)
         self.ax.add_collection(self.rays)
         self.path, = self.ax.plot([], [], color="#1f5fd1", lw=2.2, zorder=4)
@@ -118,14 +137,19 @@ class RightPanel:
         self.ax.set_xlim(g.x_min, g.x_max)
         self.ax.set_ylim(g.y_min, g.y_max)
         self.ax.set_xticks([]); self.ax.set_yticks([])
-        self.fig.text(0.5, 0.965, "Carte d'occupation construite par le drone", ha="center", va="center", fontsize=15, weight="bold")
+        self.fig.text(0.5, 0.965, ("SLAM: scan matching + loop closure" if env.pose_source == "slam_lc" else "SLAM: scan matching"
+                       if env.pose_source == "slam" else "Odometry only (no correction)")
+                      if self.odom else "Carte d'occupation construite par le drone",
+                      ha="center", va="center", fontsize=13 if self.odom else 15, weight="bold")
         self.bar_bg = Rectangle((0.08, 0.915), 0.84, 0.028, transform=self.fig.transFigure, facecolor="#dddddd", edgecolor="black", lw=0.8)
         self.bar = Rectangle((0.08, 0.915), 0.0, 0.028, transform=self.fig.transFigure, facecolor="#2a9d8f")
         self.fig.add_artist(self.bar_bg); self.fig.add_artist(self.bar)
         self.fig.add_artist(plt.Line2D([0.08 + 0.84 * 0.9] * 2, [0.908, 0.950], transform=self.fig.transFigure, color="black", lw=2))
         self.cov_text = self.fig.text(0.5, 0.929, "", ha="center", va="center", fontsize=11, weight="bold")
-        self.fig.text(0.5, 0.025, "vert = libre   corail = mur   gris = inconnu   bleu = rayons LiDAR / chemin   étoile = frontière visée",
-                      ha="center", va="center", fontsize=9.5)
+        self.fig.text(0.5, 0.025, ((("black: true walls | green: true path | red: estimated path | dots: keyframes | thick red: loop")
+                                   if self.slam else "black: true walls | green: true path | red: estimated path") if self.odom
+                                   else "vert = libre   corail = mur   gris = inconnu   bleu = rayons LiDAR / chemin   étoile = frontière visée"),
+                      ha="center", va="center", fontsize=9.0 if self.odom else 9.5)
 
     @staticmethod
     def _rgb(g):
@@ -135,10 +159,28 @@ class RightPanel:
         return COLORS[idx]
 
     def frame(self, env, coverage):
-        g = env.grid
+        g = env.est_grid if self.odom else env.grid
         self.img.set_data(self._rgb(g))
         o, dirs, dists = env._last_lidar_origin, env._last_lidar_dirs, env._last_lidar_dists
-        self.rays.set_segments([[(o[0], o[1]), (o[0] + d[0] * r, o[1] + d[1] * r)] for d, r in zip(dirs, dists)])
+        pos = env.data.body("drone_body").xpos[:2]
+        nose = _quat_to_yaw(env.data.body("drone_body").xquat) + np.pi / 2     # le côté orange (+y du corps) est l'avant
+        if self.odom:
+            ex, ey, eyaw = env._odom.pose
+            dpsi = eyaw - _quat_to_yaw(env.data.body("drone_body").xquat)
+            c, s_ = np.cos(dpsi), np.sin(dpsi)
+            occ = env.grid.grid == OCCUPIED
+            rgba = np.zeros(occ.shape + (4,), dtype=np.uint8)
+            rgba[occ] = (0, 0, 0, 215)
+            self.true_img.set_data(rgba)
+            self.rays.set_segments([[(ex, ey), (ex + (c * d[0] - s_ * d[1]) * r, ey + (s_ * d[0] + c * d[1]) * r)] for d, r in zip(dirs, dists)])
+            self.xy_true.append((pos[0], pos[1])); self.xy_est.append((ex, ey))
+            self.path_true.set_data([p[0] for p in self.xy_true], [p[1] for p in self.xy_true])
+            self.path_est.set_data([p[0] for p in self.xy_est], [p[1] for p in self.xy_est])
+            self.true_marker.set_data([pos[0]], [pos[1]])
+            pos = np.array([ex, ey])          # le drone estimé est le point noir ; le vrai est le point vert
+            nose = eyaw + np.pi / 2
+        else:
+            self.rays.set_segments([[(o[0], o[1]), (o[0] + d[0] * r, o[1] + d[1] * r)] for d, r in zip(dirs, dists)])
         fr = env._last_frontiers[0] if env._last_frontiers else None
         if fr is not None and fr["valid"] > 0 and fr.get("world_xy"):
             self.target.set_data([fr["world_xy"][0]], [fr["world_xy"][1]])
@@ -146,13 +188,31 @@ class RightPanel:
             self.path.set_data([p[0] for p in pts], [p[1] for p in pts])
         else:
             self.target.set_data([], []); self.path.set_data([], [])
-        pos = env.data.body("drone_body").xpos[:2]
-        nose = _quat_to_yaw(env.data.body("drone_body").xquat) + np.pi / 2     # le côté orange (+y du corps) est l'avant
         self.drone.set_data([pos[0]], [pos[1]])
         self.arrow.xy = (pos[0] + 0.9 * np.cos(nose), pos[1] + 0.9 * np.sin(nose))
         self.arrow.xyann = (pos[0], pos[1])
         self.bar.set_width(0.84 * min(coverage, 1.0))
-        self.cov_text.set_text(f"Couverture {coverage * 100:.0f} %   (objectif 90 %)")
+        self.n_frames += 1
+        if self.slam:
+            sl = env._slam
+            pts = np.array([k.pose[:2] for k in sl.kfs]) if sl.kfs else np.zeros((0, 2))
+            self.nodes.set_data(pts[:, 0], pts[:, 1])
+            self.g_odom.set_segments([[tuple(sl.kfs[i].pose[:2]), tuple(sl.kfs[j].pose[:2])] for i, j, m, kd in sl.edges if kd == "odom"])
+            self.g_loop.set_segments([[tuple(sl.kfs[i].pose[:2]), tuple(sl.kfs[j].pose[:2])] for i, j, m, kd in sl.edges if kd == "loop"])
+            if sl.loops_accepted > self.last_loops:
+                self.last_loops = sl.loops_accepted
+                ev = sl.events[-1]
+                if ev["max_shift"] > 0.02:       # only announce loops that really moved the map
+                    self.flash_until = self.n_frames + 8
+                    self.flash.set_text(f"Loop closure #{sl.loops_accepted}: map rebuilt")
+            if self.n_frames > self.flash_until:
+                self.flash.set_text("")
+        if self.odom and self.slam:
+            self.cov_text.set_text(f"Coverage {coverage * 100:.0f}%  |  position error {(env.pose_err[-1] if env.pose_err else 0.0):.2f} m  |  loops {env._slam.loops_accepted}")
+        elif self.odom:
+            self.cov_text.set_text(f"Coverage {coverage * 100:.0f}%  |  position error {(env.pose_err[-1] if env.pose_err else 0.0):.2f} m")
+        else:
+            self.cov_text.set_text(f"Couverture {coverage * 100:.0f} %   (objectif 90 %)")
         self.fig.canvas.draw()
         return np.asarray(self.fig.canvas.buffer_rgba())[..., :3].copy()
 
@@ -164,6 +224,8 @@ def video_kw():
     """Réglages propres à la vidéo : vitesse de rotation du nez ; et, par défaut, PAS d'arrêt à 90 % (cible inatteignable) : l'épisode ne finit que
     quand le drone ne découvre plus aucune case pendant OPT['stag'] pas (ou collision, ou 6000 pas). Aucun effet sur les entrées du réseau."""
     kw = dict(yaw_follow_rate=OPT["yaw_rate"], yaw_follow_min_speed=OPT["yaw_min_speed"])
+    if OPT["pose_source"] != "oracle":
+        kw.update(pose_source=OPT["pose_source"], odom_noise=OPT["odom_noise"])
     if OPT["full"]:
         kw.update(coverage_target=1.01, stagnation_start=0, stagnation_limit=OPT["stag"], max_steps=6000)
     return kw
@@ -222,11 +284,12 @@ def run(level, seed, policy, model_name, out_dir, stride, fps, size, azimuth, gi
             if term or trunc or (OPT["full"] and idle >= 25 and t > 200):
                 break
         res, cov = outcome(env, term, trunc, idle >= 25 and t > 200)
-        print(f"niveau {level} seed {seed} [{policy}] : {res:9s} {t + 1:5d} pas ({(t + 1) * 0.02:5.1f} s) couverture {cov * 100:.1f} %")
+        print(f"niveau {level} seed {seed} [{policy}] : {res:9s} {t + 1:5d} pas ({(t + 1) * 0.02:5.1f} s) couverture {cov * 100:.1f} %"
+              + (f" | erreur finale {(env.pose_err[-1] if env.pose_err else 0.0):.2f} m, max {max(env.pose_err):.2f} m" if env._odom is not None else ""))
         return res, t + 1
     left, right = LeftPanel(env, size, azimuth, OPT["view"]), RightPanel(env, size)
     font, small = make_font(26), make_font(20)
-    name = f"demo_{policy}_niveau{level}_seed{seed}" + ("_3d" if OPT["view"] == "follow" else "") + (f"_lacet{OPT['yaw_rate']:g}" if OPT["yaw_rate"] != 1.2 else "") + ("_90pct" if not OPT["full"] else "")
+    name = f"demo_{policy}_niveau{level}_seed{seed}" + (f"_{OPT['pose_source']}_{OPT['odom_noise']}" if OPT["pose_source"] != "oracle" else "") + ("_3d" if OPT["view"] == "follow" else "") + (f"_lacet{OPT['yaw_rate']:g}" if OPT["yaw_rate"] != 1.2 else "") + ("_90pct" if not OPT["full"] else "")
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, name + ".mp4")
     writer = imageio.get_writer(path, fps=fps, codec="libx264", quality=8, pixelformat="yuv420p", macro_block_size=16)
@@ -238,7 +301,7 @@ def run(level, seed, policy, model_name, out_dir, stride, fps, size, azimuth, gi
         img = Image.fromarray(a)
         d = ImageDraw.Draw(img)
         d.rectangle([0, 0, size, 44], fill=(20, 20, 20))
-        d.text((12, 8), f"Simulation MuJoCo ({'vue du dessus' if OPT['view'] == 'top' else 'vue 3D, caméra de suivi'})   t = {t * 0.02:5.1f} s", fill=(255, 255, 255), font=small)
+        d.text((12, 8), (f"MuJoCo simulation   t = {t * 0.02:4.1f} s" if OPT["pose_source"] != "oracle" else f"Simulation MuJoCo ({'vue du dessus' if OPT['view'] == 'top' else 'vue 3D, caméra de suivi'})   t = {t * 0.02:5.1f} s"), fill=(255, 255, 255), font=small)
         if banner:
             d.rectangle([0, size - 54, size, size], fill=(20, 20, 20))
             d.text((12, size - 46), banner, fill=(255, 255, 255), font=font)
@@ -251,7 +314,7 @@ def run(level, seed, policy, model_name, out_dir, stride, fps, size, azimuth, gi
         if gif:
             gif_frames.append(Image.fromarray(frame).resize((frame.shape[1] // 2, frame.shape[0] // 2), Image.LANCZOS))
 
-    first = grab(0, f"niveau {level} - seed {seed} - {'expert scripté' if policy == 'expert' else 'clone appris'}")
+    first = grab(0, (f"Level {level}, seed {seed}: " + {"odom": "odometry only", "slam": "scan matching", "slam_lc": "scan matching + loop closure"}[OPT["pose_source"]] + f" ({OPT['odom_noise']} noise)") if OPT["pose_source"] != "oracle" else f"niveau {level} - seed {seed} - {'expert scripté' if policy == 'expert' else 'clone appris'}")
     emit(first, fps)
     t, idle = 0, 0
     for t in range(env.max_steps):
@@ -265,6 +328,9 @@ def run(level, seed, policy, model_name, out_dir, stride, fps, size, azimuth, gi
     label = {"victoire": f"Terminé : {cov * 100:.0f} % de la maison cartographiée, sans collision",
              "complète": f"Terminé : {cov * 100:.0f} % de la maison cartographiée, sans collision",
              "collision": f"Collision à {cov * 100:.0f} % de couverture", "timeout": f"Temps écoulé à {cov * 100:.0f} % de couverture"}[res]
+    if OPT["pose_source"] != "oracle":
+        label = {"complète": f"Done - {cov * 100:.0f}% mapped", "victoire": f"Done - {cov * 100:.0f}% mapped",
+                 "collision": f"Collision at {cov * 100:.0f}% coverage", "timeout": f"Timeout at {cov * 100:.0f}% coverage"}[res]
     emit(grab(t + 1, label), 2 * fps)
     writer.close()
     if gif:
@@ -293,8 +359,11 @@ if __name__ == "__main__":
     ap.add_argument("--stag", type=int, default=600, help="End the episode after N steps without a new cell (full mode). The normal end is no valid frontier for 25 steps.")
     ap.add_argument("--yaw-rate", type=float, default=1.2, help="Maximum nose rotation rate, rad/s (display only).")
     ap.add_argument("--yaw-min-speed", type=float, default=0.8, help="The nose only turns above this speed, m/s.")
+    ap.add_argument("--pose-source", choices=["oracle", "odom", "slam", "slam_lc"], default="oracle",
+                    help="oracle: exact pose; odom: dead reckoning; slam: + scan matching; slam_lc: + loop closure and map reconstruction.")
+    ap.add_argument("--odom-noise", choices=["low", "medium", "high", "extreme"], default="medium", help="Noise level of the odometry (not used with oracle).")
     a = ap.parse_args()
-    OPT.update(full=not a.stop_at_target, stag=a.stag, yaw_rate=a.yaw_rate, yaw_min_speed=a.yaw_min_speed, view=a.view)
+    OPT.update(pose_source=a.pose_source, odom_noise=a.odom_noise, full=not a.stop_at_target, stag=a.stag, yaw_rate=a.yaw_rate, yaw_min_speed=a.yaw_min_speed, view=a.view)
     seeds = list(range(*a.seed_range)) if a.seed_range else a.seeds
     for s in seeds:
         run(a.level, s, a.policy, a.model, a.out, a.stride, a.fps, a.size, a.azimuth, a.gif, a.list)
